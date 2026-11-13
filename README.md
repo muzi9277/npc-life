@@ -2,7 +2,7 @@
 
 版本：`3.0.0-beta.1`  
 目标环境：SillyTavern `1.17.0`（ST1.17.0）  
-作者：YG
+作者：木子 （使用了gpt6.1 sol做的）
 
 NPC Life 是一个无构建、原生 ESM + jQuery 的 SillyTavern 前端扩展。它保留旧原型的 NPC 模拟与约束核心，并提供五页手机式控制台。控制台只负责 UI 与剧情相关的数据操作，不把页面结构当成剧情规则。
 
@@ -98,4 +98,4 @@ ST 副 API 使用已核实的 `ConnectionManagerRequestService` 方法 `getSuppo
 
 ## 许可
 
-原作者标记为 YG。用户尚未指定开源许可证，本项目未附 `LICENSE`；本 README 不构成开源许可授予。
+原作者标记为 muzi。用户尚未指定开源许可证，本项目未附 `LICENSE`；本 README 不构成开源许可授予。
