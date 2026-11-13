@@ -1,0 +1,23 @@
+# Local editor and OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local test output and temporary exports
+*.log
+*.tmp
+*.bak
+coverage/
+
+# Local screenshots and mock artifacts
+screenshots/
+artifacts/
+
+# User-specific local data; never commit connection or chat data
+*.local.json
+.env
+.env.*
+
+# Release build output (regenerate from source)
+release/

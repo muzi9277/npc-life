@@ -1,0 +1,38 @@
+{
+  "locations": [
+    {
+      "id": "mist-harbor-lighthouse",
+      "name": "雾港旧灯塔",
+      "tags": ["海边", "高处", "夜间可见"],
+      "x": 22,
+      "y": 70
+    },
+    {
+      "id": "copper-market",
+      "name": "铜铃集市",
+      "tags": ["集市", "人多", "白天"],
+      "x": 66,
+      "y": 44
+    },
+    {
+      "id": "reed-garden",
+      "name": "芦影温室",
+      "tags": ["温室", "安静"],
+      "x": 48,
+      "y": 18
+    }
+  ],
+  "routes": [
+    {
+      "fromId": "mist-harbor-lighthouse",
+      "toId": "copper-market",
+      "durationDays": 1
+    },
+    {
+      "fromId": "copper-market",
+      "toId": "reed-garden",
+      "durationDays": 2
+    }
+  ],
+  "image": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+}

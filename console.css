@@ -1,0 +1,88 @@
+#npc-life-console.nlc {
+    --nlc-border: var(--SmartThemeBorderColor, rgba(128, 128, 128, .5));
+    --nlc-bg: var(--SmartThemeBlurTintColor, var(--SmartThemeBodyColor, #202124));
+    --nlc-text: var(--SmartThemeBodyColor, inherit);
+    --nlc-soft: var(--black30a, rgba(0, 0, 0, .16));
+    position: fixed;
+    z-index: 10040;
+    display: flex;
+    flex-direction: column;
+    min-width: 360px;
+    min-height: 300px;
+    max-width: calc(100vw - 16px);
+    max-height: calc(100vh - 16px);
+    overflow: hidden;
+    resize: both;
+    border: 1px solid var(--nlc-border);
+    border-radius: 7px;
+    color: var(--nlc-text);
+    background: var(--nlc-bg);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, .35);
+}
+#npc-life-console[hidden] { display: none !important; }
+#npc-life-console, #npc-life-console * { box-sizing: border-box; }
+#npc-life-console .nlc-bar { display:flex; flex:0 0 auto; align-items:center; gap:12px; min-height:42px; padding:5px 8px 5px 12px; border-bottom:1px solid var(--nlc-border); cursor:grab; touch-action:none; user-select:none; }
+#npc-life-console .nlc-bar:active { cursor:grabbing; }
+#npc-life-console .nlc-world { flex:1; overflow:hidden; opacity:.75; text-overflow:ellipsis; white-space:nowrap; font-size:.88em; }
+#npc-life-console .nlc-controls, #npc-life-console .nlc-tabs, #npc-life-console .nlc-row { display:flex; align-items:center; flex-wrap:wrap; gap:7px; }
+#npc-life-console .nlc-controls .menu_button { min-width:30px; padding:3px 8px; margin:0; }
+#npc-life-console .nlc-tabs { flex:0 0 auto; padding:7px 10px 0; border-bottom:1px solid var(--nlc-border); }
+#npc-life-console .nlc-tabs .menu_button { margin:0; border-radius:4px 4px 0 0; }
+#npc-life-console .nlc-tabs .is-active { border-bottom:2px solid var(--SmartThemeQuoteColor, #6c9); }
+#npc-life-console .nlc-status { flex:0 0 auto; min-height:0; padding:0 14px; font-size:.86em; }
+#npc-life-console .nlc-status:not(:empty) { padding-top:7px; }
+#npc-life-console .nlc-status.is-error, #npc-life-console .nlc-error { color:var(--SmartThemeEmColor, #e77); }
+#npc-life-console .nlc-pages { flex:1 1 auto; min-height:0; overflow:auto; padding:12px 14px 18px; }
+#npc-life-console .nlc-page { min-width:0; }
+#npc-life-console h2 { margin:.2em 0 .5em; font-size:1.25em; }
+#npc-life-console h3 { margin:1em 0 .45em; font-size:1em; }
+#npc-life-console p { line-height:1.5; overflow-wrap:anywhere; }
+#npc-life-console .nlc-muted { opacity:.72; font-size:.9em; }
+#npc-life-console .nlc-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(240px,100%),1fr)); gap:9px; }
+#npc-life-console .nlc-item { min-width:0; margin:4px 0; padding:9px; border:1px solid var(--nlc-border); border-radius:4px; overflow-wrap:anywhere; }
+#npc-life-console .nlc-item h3, #npc-life-console .nlc-item p { margin:3px 0 7px; }
+#npc-life-console .nlc-workbench, #npc-life-console .nlc-memory, #npc-life-console .nlc-settings > details { margin-top:12px; }
+#npc-life-console summary { cursor:pointer; user-select:none; padding:6px 0; }
+#npc-life-console .nlc-workbench-body { padding-top:8px; }
+#npc-life-console .nlc-contact { display:grid; grid-template-columns:minmax(130px, .28fr) minmax(0,1fr); gap:14px; }
+#npc-life-console .nlc-roster { display:flex; flex-direction:column; align-items:stretch; gap:5px; max-height:100%; overflow:auto; }
+#npc-life-console .nlc-roster .menu_button { margin:0; text-align:left; overflow-wrap:anywhere; }
+#npc-life-console .nlc-roster .is-active { outline:1px solid var(--SmartThemeQuoteColor, #6c9); }
+#npc-life-console .nlc-detail { min-width:0; }
+#npc-life-console .nlc-field { display:flex; flex-direction:column; gap:4px; min-width:min(180px,100%); flex:1 1 180px; margin:5px 0; }
+#npc-life-console .nlc-field > span, #npc-life-console .nlc-row label { font-size:.88em; }
+#npc-life-console .text_pole { min-width:0; max-width:100%; }
+#npc-life-console .nlc-row > label { display:flex; align-items:center; gap:6px; }
+#npc-life-console .nlc-list { display:flex; flex-direction:column; gap:5px; max-height:250px; overflow:auto; }
+#npc-life-console .nlc-list-row { padding:7px 9px; text-align:left; overflow-wrap:anywhere; }
+#npc-life-console .nlc-reading, #npc-life-console .nlc-bubble { margin:7px 0; padding:9px; border-radius:4px; background:var(--nlc-soft); overflow-wrap:anywhere; }
+#npc-life-console .nlc-reading p { white-space:pre-wrap; }
+#npc-life-console .nlc-chat { display:flex; flex-direction:column; gap:5px; max-height:230px; overflow:auto; padding:5px 0; }
+#npc-life-console .nlc-bubble { max-width:90%; white-space:pre-wrap; }
+#npc-life-console .nlc-bubble.from-user { align-self:flex-end; }
+#npc-life-console .nlc-bubble.from-npc { align-self:flex-start; }
+#npc-life-console .nlc-map { position:relative; min-height:260px; margin:10px 0; border:1px solid var(--nlc-border); border-radius:4px; background-color:var(--nlc-soft); background-position:center; background-size:contain; background-repeat:no-repeat; overflow:hidden; }
+#npc-life-console .nlc-map-node { position:absolute; transform:translate(-50%,-50%); max-width:140px; padding:4px 7px; border:1px solid var(--nlc-border); border-radius:4px; background:var(--nlc-bg); text-align:center; overflow-wrap:anywhere; font-size:.85em; }
+#npc-life-console .nlc-locations { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(240px,100%),1fr)); gap:7px; margin-top:12px; }
+#npc-life-console .nlc-location { display:flex; flex-direction:column; gap:4px; min-width:0; }
+#npc-life-console .nlc-upload { display:inline-flex; align-items:center; margin:0; cursor:pointer; }
+#npc-life-console .nlc-pre { max-height:280px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
+#npc-life-console .nlc-presets, #npc-life-console .nlc-routes, #npc-life-console.nlc-settings { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(220px,100%),1fr)); gap:7px; }
+#npc-life-console.nlc-settings > .checkbox_label { align-self:center; }
+#npc-life-console .nlc-fab, .nlc-body-entry { position:fixed; z-index:10039; right:14px; bottom:14px; margin:0; box-shadow:0 3px 12px rgba(0,0,0,.25); }
+#npc-life-console .nlc-fab { display:none; }
+#npc-life-console.is-minimized { height:44px !important; min-height:0; resize:none; }
+#npc-life-console.is-minimized .nlc-tabs, #npc-life-console.is-minimized .nlc-status, #npc-life-console.is-minimized .nlc-pages { display:none; }
+#npc-life-console.is-maximized { left:8px !important; top:8px !important; width:calc(100vw - 16px) !important; height:calc(100vh - 16px) !important; resize:none; }
+#npc-life-console.is-busy [data-action], #npc-life-console.has-global-busy [data-action] { opacity:.65; }
+#npc-life-console.is-busy [data-action="diary"], #npc-life-console.is-busy [data-action="chat-send"], #npc-life-console.is-busy [data-action="save-preferences"] { pointer-events:none; }
+@media (max-width:620px) {
+    #npc-life-console.nlc { min-width:0; min-height:0; max-width:none; max-height:none; resize:none; }
+    #npc-life-console .nlc-contact { grid-template-columns:minmax(0,1fr); }
+    #npc-life-console .nlc-roster { flex-direction:row; flex-wrap:nowrap; max-height:72px; }
+    #npc-life-console .nlc-roster .menu_button { flex:0 0 auto; }
+    #npc-life-console .nlc-tabs { overflow-x:auto; flex-wrap:nowrap; }
+    #npc-life-console .nlc-map { min-height:210px; }
+    #npc-life-console .nlc-fab { display:block; }
+    .nlc-body-entry { right:12px; bottom:12px; }
+}
