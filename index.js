@@ -154,7 +154,7 @@ function makeChat(id) {
     return {
         id, day: 1, player: { locationId: 'unknown', scene: 'unknown', locked: false },
         npcStates: {}, parties: [], events: [], pendingFacts: [], appearanceRequests: [], travelPlans: [],
-        messageFingerprint: '', lastSyncedAt: 0, processedBatches: [], appliedFacts: [], stateRevision: 0,
+        messageFingerprint: '', lastSyncedAt: 0, processedBatches: [], appliedFacts: [], canonFacts: [], stateRevision: 0,
         injection: { ids: [], rounds: 0 },
     };
 }
@@ -182,7 +182,8 @@ function makeNpcState(id) {
     return {
         npcId: id, locationId: 'unknown', activity: 'unknown', status: 'unknown',
         scene: 'unknown', source: 'unknown', confidence: 0, locked: false, updatedAt: 0, updatedDay: 0,
-        mobility: 'unknown', activityLock: null, goals: [], relationship: { value: 'unknown', note: '', source: 'unknown' },
+        mobility: 'unknown', activityLock: null, confinement: { value: 'unknown', source: 'unknown', evidence: '' },
+        goals: [], relationship: { value: 'unknown', note: '', source: 'unknown' },
         travelRate: null, travel: null, constraints: [],
     };
 }
@@ -202,11 +203,15 @@ function normalizeWorld(world, worldKey) {
     for (const chat of Object.values(world.chats || {})) {
         chat.diaries = Array.isArray(chat.diaries) ? chat.diaries : [];
         chat.conversations ||= {};
+        chat.factLedger = Array.isArray(chat.factLedger) ? chat.factLedger : [];
+        chat.messageAnchors = Array.isArray(chat.messageAnchors) ? chat.messageAnchors : [];
+        chat.canonBaseline ||= { npcStates: structuredClone(chat.npcStates || {}), parties: structuredClone(chat.parties || []), player: structuredClone(chat.player || { locationId: 'unknown', scene: 'unknown', locked: false }), day: chat.day || 1 };
         chat.npcStates ||= {};
         chat.appearanceRequests ||= [];
         chat.travelPlans ||= [];
         chat.processedBatches ||= [];
         chat.appliedFacts ||= [];
+        chat.canonFacts = Array.isArray(chat.canonFacts) ? chat.canonFacts : [];
         chat.parties ||= [];
         chat.events ||= [];
         chat.pendingFacts ||= [];
@@ -453,13 +458,56 @@ function chatFingerprint() {
     return hashText(recentChatText(50));
 }
 
+// 为聊天消息生成可比较的锚点，编辑/删除后能撤销依赖该消息的正史事实。
+function messageAnchors() {
+    const messages = Array.isArray(getCtx().chat) ? getCtx().chat : [];
+    return messages.map((message, index) => {
+        const role = cleanText(message?.role || (message?.is_user ? 'user' : 'assistant'));
+        const name = cleanText(message?.name || message?.ch_name || '');
+        const content = sanitizeEntry(message?.mes ?? message?.content ?? message?.message ?? '');
+        const stable = message?.id ?? message?.mes_id ?? `${index}:${role}:${name}`;
+        return { key: hashText(`${stable}|${role}|${name}|${content}`), index, role, name, content };
+    });
+}
+
+// 将已经删除或编辑来源消息的正史事实标记失效，并清空对应的旧注入。
+function revokeMissingCanonFacts(world, chat) {
+    const current = new Set(messageAnchors().map(item => item.key));
+    let changed = false;
+    for (const fact of chat.factLedger || []) {
+        if (fact.authority === 'canon' && fact.status === 'active' && fact.messageKey && !current.has(fact.messageKey)) { fact.status = 'revoked'; changed = true; }
+    }
+    if (!changed) return false;
+    const baseline = chat.canonBaseline;
+    if (baseline) {
+        chat.npcStates = structuredClone(baseline.npcStates || {});
+        chat.parties = structuredClone(baseline.parties || []);
+        chat.player = structuredClone(baseline.player || { locationId: 'unknown', scene: 'unknown', locked: false });
+    }
+    chat.events = chat.events.filter(event => event.source !== 'canon' || chat.factLedger.some(fact => fact.id === event.derivedFrom && fact.status === 'active'));
+    chat.canonFacts = chat.canonFacts.filter(fact => !fact.messageKey || current.has(fact.messageKey));
+    chat.injection.ids = [];
+    try { setPrompt(''); } catch { /* host unavailable */ }
+    return true;
+}
+
+// 只允许用户明确陈述类句子升级为正史，愿望/假设/命令保持提案。
+function userCanonCandidate(evidence) {
+    const value = cleanText(evidence);
+    if (!value) return false;
+    if (/(希望|想要|想让|请让|如果|假如|要是|应该|能不能|让.+出现|召唤|忽略规则|强制)/u.test(value)) return false;
+    return /(逃出|逃离|救出|救下|带.+离开|一起走|同行|跟着|分开|离开了|抵达|到达|已经在|正在)/u.test(value);
+}
+
 // 解析模型提出的结构化剧情事实，原始证据保留在待审核记录里。
 async function extractStoryFacts() {
     const { world, chat } = activeData();
+    revokeMissingCanonFacts(world, chat);
     const transcript = recentChatText();
     const token = revision;
     const initialStateRevision = chat.stateRevision;
     const initialFingerprint = chatFingerprint();
+    const initialAnchors = messageAnchors();
     if (!transcript) throw new Error('当前聊天没有可提取的正文。');
     const catalog = [
         `NPC：${world.catalog.npcs.map(item => `${item.name}(${item.id})`).join('、') || '无'}`,
@@ -472,8 +520,8 @@ async function extractStoryFacts() {
         direct: { type: 'boolean' }, confidence: { type: 'number' }, sourceRole: { type: 'string' },
     }, required: ['type', 'subjects', 'summary', 'evidence', 'direct', 'confidence'] } } }, required: ['facts'] };
     const raw = await rawGenerate(
-        '你是 RPG 世界状态提取器。只把叙事正文中已经发生的事实提取出来。用户的愿望、命令、假设和提议不是事实；不要因为用户说“某人就在这里”就移动 NPC。优先采用角色卡/旁白角色已经明确写出的行动。未知地点、模糊代词和冲突事实保持 direct=false。',
-        `当前目录：\n${catalog}\n\n最近正文：\n${transcript}\n\n只返回 JSON。每条事实写出原文证据；若正文明确几名 NPC 同处且没有分离，使用 together；明确分开才使用 separate。`,
+        '你是 RPG 剧情事件提取器。用户明确叙述为已经发生的正文（例如“主角带叶知微逃出监狱”“叶知微和主角一起离开”）属于当前正史，应标 sourceRole=user, direct=true, confidence>=0.95；这类用户创作可以覆盖角色卡初始处境。用户愿望/假设/命令（“希望她来”“如果逃出”“请让她出现”）不是已发生事实，必须 direct=false。助手叙事已经发生的事件也可作为 story 提案。不要推断没说出的目的地，未知位置保持空。',
+        `当前目录：\n${catalog}\n\n最近正文（每行带来源标签）：\n${transcript}\n\n只返回 JSON。每条事实必须引用完全匹配的原文证据。明确逃出/获救可用 status，object 填 escaped/rescued，activity 写结果；明确同处同行使用 together。`,
         schema,
     );
     const parsed = parseJsonResponse(raw);
@@ -484,16 +532,22 @@ async function extractStoryFacts() {
     const proposals = [];
     for (const fact of Array.isArray(parsed.facts) ? parsed.facts : []) {
         const evidence = cleanText(fact?.evidence);
-        const evidenceVerified = evidence.length >= 3 && transcript.split('\n').some(line =>
-            /^\[\d+\|assistant(?:\||\])/.test(line) && line.includes(evidence));
-        const sourceVerified = evidenceVerified;
+        const matchingMessage = initialAnchors.find(item => item.content.includes(evidence));
+        const evidenceVerified = evidence.length >= 3 && Boolean(matchingMessage);
+        const userDirect = matchingMessage?.role === 'user' && userCanonCandidate(evidence);
+        const assistantDirect = matchingMessage?.role === 'assistant' && fact?.direct === true && Number(fact?.confidence) >= 0.75;
         const proposal = normalizeFact(world, {
             ...fact,
-            direct: fact?.direct === true && evidenceVerified && sourceVerified,
+            direct: evidenceVerified && (userDirect || assistantDirect),
         }, fingerprint);
         if (proposal) proposals.push(proposal);
     }
-    chat.pendingFacts = [...chat.pendingFacts.filter(item => item.messageFingerprint !== fingerprint), ...proposals].slice(-MAX_PENDING);
+    for (const proposal of proposals) {
+        if (proposal.authority === 'canon') applyCanonFact(world, chat, proposal);
+    }
+    chat.pendingFacts = [...chat.pendingFacts.filter(item => item.messageFingerprint !== fingerprint), ...proposals.filter(item => item.authority !== 'canon')].slice(-MAX_PENDING);
+    chat.factLedger = [...chat.factLedger.filter(item => item.messageFingerprint !== fingerprint), ...proposals.map(item => ({ ...item, status: item.authority === 'canon' ? 'active' : 'proposal' }))].slice(-300);
+    chat.messageAnchors = messageAnchors();
     chat.messageFingerprint = fingerprint;
     chat.lastSyncedAt = Date.now();
     save();
@@ -510,7 +564,10 @@ function normalizeFact(world, fact, fingerprint) {
     const validLocation = location?.confirmed ? location.id : 'unknown';
     const confidence = Math.max(0, Math.min(1, Number(fact.confidence) || 0));
     const locationRequired = ['position', 'player_position', 'encounter'].includes(type);
-    const direct = fact.direct === true && confidence >= 0.75 && (!locationRequired || validLocation !== 'unknown');
+    const evidence = cleanText(fact.evidence);
+    const sourceMessage = messageAnchors().find(item => item.content.includes(evidence));
+    const userCanon = sourceMessage?.role === 'user' && userCanonCandidate(evidence);
+    const direct = (userCanon || (fact.direct === true && confidence >= 0.75)) && (!locationRequired || validLocation !== 'unknown');
     const requiresNpc = ['position', 'together', 'separate', 'activity', 'encounter', 'status'].includes(type);
     if (requiresNpc && !npcIds.length) return null;
     return {
@@ -518,6 +575,7 @@ function normalizeFact(world, fact, fingerprint) {
         activity: cleanText(fact.activity).slice(0, 240), day: safeInt(fact.day, 0, 0, 1000000),
         summary: cleanText(fact.summary).slice(0, 500), evidence: cleanText(fact.evidence).slice(0, 500),
         direct, confidence, sourceRole: cleanText(fact.sourceRole), messageFingerprint: fingerprint,
+        messageKey: sourceMessage?.key || '', authority: direct && sourceMessage?.role === 'user' ? 'canon' : 'proposal',
         createdAt: Date.now(), status: direct ? 'ready' : 'review',
     };
 }
@@ -580,6 +638,44 @@ function validateTransition(world, chat, npcIds, destinationId, options = {}) {
         }
     }
     return { allowed: true, code: 'allowed', reason: '状态转换符合当前硬约束。' };
+}
+
+// 将明确正史事实转换为状态变化：用户正文优先于初始卡设定，但不会接受愿望或模型猜测。
+function applyCanonFact(world, chat, fact) {
+    if (!fact?.direct || !fact.messageFingerprint || !fact.evidence) return false;
+    const key = `${fact.messageFingerprint}|${fact.type}|${fact.npcIds.join(',')}|${fact.locationId}|${fact.summary}`;
+    if (chat.canonFacts.some(item => item.key === key && item.valid !== false)) return false;
+    const validLocation = fact.locationId !== 'unknown' ? world.catalog.locations.find(item => item.id === fact.locationId && item.confirmed) : null;
+    const ids = fact.npcIds || [];
+    const type = fact.type;
+    const canMove = type === 'position' || type === 'encounter' || type === 'together';
+    if (canMove && !validLocation) return false;
+    const states = ids.map(id => chat.npcStates[id] || (chat.npcStates[id] = makeNpcState(id)));
+    if (type === 'status' && ['escaped', 'rescued', 'freed'].includes(String(fact.object || '').toLowerCase())) {
+        for (const state of states) {
+            state.confinement = { value: String(fact.object).toLowerCase(), source: 'canon', evidence: fact.evidence };
+            if (state.activityLock?.source === 'migration' || state.activityLock?.source === 'card') { state.activityLock = null; state.locked = false; state.mobility = 'free'; }
+            state.status = fact.activity || fact.summary; state.source = 'canon'; state.confidence = 1; state.updatedDay = fact.day || chat.day; state.updatedAt = Date.now();
+        }
+    }
+    if (canMove) for (const state of states) {
+        state.locationId = validLocation.id; state.source = 'canon'; state.confidence = 1; state.updatedDay = fact.day || chat.day; state.updatedAt = Date.now();
+        if (type === 'encounter') state.scene = ids.length > 1 ? 'away' : 'present';
+        // 用户明确正文事实可以解除被剧情推翻的初始限制；不解除用户后来手动设置的锁。
+        if (state.activityLock?.source === 'migration' || state.activityLock?.source === 'card') { state.activityLock = null; state.locked = false; state.mobility = 'free'; }
+    }
+    if (type === 'together' && ids.length >= 2) {
+        const old = chat.parties.filter(party => ids.some(id => party.members.includes(id)) && ids.some(id => !party.members.includes(id)));
+        if (!old.length) chat.parties = chat.parties.filter(party => !ids.every(id => party.members.includes(id)));
+        chat.parties.push({ id: `canon:${fact.id}`, members: [...new Set(ids)], locationId: validLocation.id, source: 'canon', confirmed: true, updatedDay: fact.day || chat.day, updatedAt: Date.now() });
+    }
+    if (type === 'separate') chat.parties = chat.parties.filter(party => !ids.every(id => party.members.includes(id)));
+    const canonEvent = { kind: type, summary: fact.summary, npcIds: ids, locationId: fact.locationId,
+        participants: ids, source: 'canon', visibility: 'story', derivedFrom: fact.id };
+    if (type !== 'status' || fact.object || fact.activity) addEvent(chat, canonEvent);
+    chat.canonFacts.push({ key, id: fact.id, type, npcIds: ids, locationId: fact.locationId, evidence: fact.evidence, summary: fact.summary, messageFingerprint: fact.messageFingerprint, messageKey: fact.messageKey, valid: true, appliedAt: Date.now() });
+    chat.canonFacts = chat.canonFacts.slice(-300);
+    return true;
 }
 
 // 将一个已审核正文事实应用到聊天状态；手动确认事实不等于绕过硬约束。
@@ -1539,6 +1635,8 @@ function attachConsole() {
         setMapImage: file => consoleFeatures.setMapImage(file),
         setLocationTags: (...args) => consoleFeatures.setLocationTags(...args),
         refreshMemory: () => consoleFeatures.memory(),
+        testSecondaryProfile: id => consoleFeatures.testSecondaryProfile(id),
+        openConnectionManager: () => status('请使用酒馆内置 Connection Manager 编辑渠道。NPC Life 不保存 API 密钥。'),
         getWorkbench: () => document.querySelector(ROOT),
         openWorkbench: () => consoleView?.open('dynamic'),
         exportData: exportJson, importData: importJson, notify: status,

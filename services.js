@@ -174,6 +174,15 @@ export function createConsoleFeatures(host) {
         request,
         busy: () => working > 0,
         profiles, memory, relevant,
+        // 只测试已选副 profile，不写入剧情、不切换主连接，也不静默 fallback。
+        async testSecondaryProfile(profileId) {
+            const previous = prefs().secondaryProfileId;
+            if (!profileId || profileId !== previous) throw new Error('请先保存要测试的副 profile；测试不会替你选择或创建渠道。');
+            const selected = profiles().profiles.find(item => item.id === profileId);
+            if (!selected) throw new Error('副 profile 不存在或不受支持。');
+            const result = await request('你是连接测试。只回复 OK。', '回复 OK。', 'analysis');
+            return { profileId, name: selected.name, result };
+        },
         // 保存真实消费的偏好字段，禁止通过补丁写入任意对象或凭据。
         savePreferences(patch) {
             const store = host.data().store;

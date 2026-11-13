@@ -23,6 +23,8 @@ export function mountConsole(adapter) {
     const cleanups = [], root = $('<section id="npc-life-console" class="nlc" hidden aria-label="NPC Life 控制台"></section>');
     root.html(`<header class="nlc-bar" data-drag><strong>NPC Life</strong><span class="nlc-version">3.0.0-beta.1</span><span class="nlc-world"></span><span class="nlc-controls"><button class="menu_button" data-smaller aria-label="缩小窗口" title="缩小">−</button><button class="menu_button" data-larger aria-label="放大窗口" title="放大">＋</button><button class="menu_button" data-min aria-label="最小化窗口" title="最小化">⌄</button><button class="menu_button" data-max aria-label="最大化或恢复窗口" title="最大化/恢复">□</button><button class="menu_button" data-close aria-label="关闭窗口" title="关闭">×</button></span></header><nav class="nlc-tabs" role="tablist"></nav><div class="nlc-status" role="status" aria-live="polite"></div><main class="nlc-pages"></main><button type="button" class="menu_button nlc-fab" data-fab title="打开 NPC Life">NPC Life</button>`);
     $('body').append(root);
+    const channelDialog = $(`<div class="nlc-channel-overlay" hidden><section class="nlc-channel-dialog" role="dialog" aria-modal="true" aria-labelledby="nlc-channel-title"><header><b id="nlc-channel-title">编辑副 API 渠道</b><button type="button" class="menu_button" data-channel-close>×</button></header><div class="nlc-channel-body"><label>渠道名<input class="text_pole" data-channel-name placeholder="副 API 渠道"></label><label>API 类型<input class="text_pole" data-channel-api placeholder="openai / textgenerationwebui"></label><label>API 地址<input class="text_pole" data-channel-url placeholder="由酒馆 Connection Manager 保存"></label><label>API 密钥<input class="text_pole" data-channel-secret type="password" placeholder="不会保存到 NPC Life"></label><label>模型<input class="text_pole" data-channel-model placeholder="继承 profile"></label><div class="nlc-channel-grid"><label>温度<input class="text_pole" data-channel-temperature type="number" min="0" max="2" step="0.1" value="1"></label><label>最大 token<input class="text_pole" data-channel-tokens type="number" min="256" max="8192" step="256" value="2048"></label><label>超时(秒)<input class="text_pole" data-channel-timeout type="number" min="1" max="600" value="180"></label><label>思考强度<input class="text_pole" data-channel-reasoning placeholder="auto"></label></div><label class="checkbox_label"><input type="checkbox" data-channel-stream><span>流式传输（当前任务不启用）</span></label><label>排除参数<input class="text_pole" data-channel-exclude placeholder="逗号分隔，如 temperature"></label><p class="nlc-muted">渠道地址、模型和密钥由酒馆 Connection Manager 管理。NPC Life 只保存任务路由和临时 token 预算，不会创建或覆盖渠道。</p><div class="nlc-channel-actions"><button type="button" class="menu_button" data-channel-manager>打开 Connection Manager</button><button type="button" class="menu_button" data-channel-test>测试当前副渠道</button><button type="button" class="menu_button" data-channel-done>完成</button></div><div class="nlc-status" data-channel-status></div></div></section></div>`);
+    $('body').append(channelDialog);
     const pages = root.find('.nlc-pages'), status = root.find('.nlc-status');
     // 统一注册可撤销的 DOM 监听器。
     function listen(target, event, fn, opts) { target.addEventListener(event, fn, opts); cleanups.push(() => target.removeEventListener(event, fn, opts)); }
@@ -119,7 +121,7 @@ export function mountConsole(adapter) {
         page.append(field('用户称呼', 'userName', p.userName), field('日记字数', 'diaryChars', p.diaryChars, 'number'), field('上下文预算', 'contextChars', p.contextChars, 'number'));
         page.append($('<label class="checkbox_label"><input type="checkbox" data-pref="memoryEnabled"><span>启用增强记忆</span></label>').find('input').prop('checked', Boolean(p.memoryEnabled)).end(), field('记忆预算', 'memoryChars', p.memoryChars, 'number'));
         const profile = $('<select class="text_pole" data-field="secondaryProfileId"><option value="">无副 profile</option></select>'); (state.profiles || []).forEach(x => profile.append($('<option>').val(x.id).text(`${x.name || x.id} · ${x.model || '模型未知'}`))); profile.val(p.secondaryProfileId || '');
-        page.append($('<label class="nlc-field"><span>副 profile</span></label>').append(profile));
+        page.append($('<label class="nlc-field"><span>副 API 渠道</span></label>').append(profile), button('管理/编辑副渠道', 'edit-secondary-profile'), button('测试当前副渠道', 'test-secondary-profile'));
         const preset = $('<div class="nlc-presets">'); (state.profiles || []).forEach(x => preset.append($('<div class="nlc-item">').append($('<b>').text(x.name || x.id), $('<p>').text(`${x.model || '模型未知'} · ${x.preset || '默认预设'}`)))); page.append(preset);
         const routes = $('<div class="nlc-routes">'); ['analysis','simulation','narrative','chat'].forEach(task => { const sel = $('<select class="text_pole" data-route>').attr('data-task', task).append('<option value="main">主 profile</option><option value="secondary">副 profile</option>').val(p.routes?.[task] || 'main'); routes.append($('<label class="nlc-field">').append($('<span>').text({ analysis:'分析', simulation:'模拟', narrative:'叙事', chat:'试聊' }[task]), sel)); });
         page.append(routes, field('最大生成 token', 'maxTokens', p.maxTokens, 'number'));
@@ -166,9 +168,25 @@ export function mountConsole(adapter) {
         if (action === 'chat-clear') { const id = npcId; run(() => adapter.clearChat(id), () => tell('试聊记录已清空。')); return; }
         if (action === 'import-map') { const raw = root.find('[data-field="map-json"]').val(); run(async () => { const result = await adapter.importMap(String(raw || '')); if (result === false) return false; return result; }, result => { if (result === false) tell('已取消地图导入。'); else tell('地图数据已导入。'); }); return; }
         if (action === 'save-preferences') { run(savePrefs, () => tell('设置已保存。')); return; }
+        if (action === 'test-secondary-profile' || el.is('[data-channel-test]')) { const id = String(root.find('[data-field="secondaryProfileId"]').val() || ''); if (!id) { tell('请先选择并保存副 API profile。', true); return; } run(() => adapter.testSecondaryProfile(id), result => tell(`副渠道测试通过：${result.name || id}，返回：${String(result.result || '').slice(0, 120)}`)); return; }
+        if (action === 'edit-secondary-profile') { openChannelDialog(); return; }
         if (action === 'memory-refresh') { run(() => adapter.refreshMemory(), result => { if (result) state.memory = result; tell('记忆表已刷新。'); }); return; }
         if (action === 'export') { run(() => adapter.exportData(), () => tell('数据已导出。')); }
     });
+    // 打开仿 Connection Manager 的副渠道信息窗；敏感字段仅提示由酒馆管理。
+    function openChannelDialog() {
+        const current = state.profiles?.find(item => item.id === state.preferences?.secondaryProfileId);
+        channelDialog.removeAttr('hidden');
+        channelDialog.find('[data-channel-name]').val(current?.name || '');
+        channelDialog.find('[data-channel-api]').val('profile: ' + (current?.id || '未选择')).prop('disabled', true);
+        channelDialog.find('[data-channel-url]').val(current ? '已由酒馆 Connection Manager 配置' : '未选择 profile').prop('disabled', true);
+        channelDialog.find('[data-channel-secret]').val('').prop('disabled', true);
+        channelDialog.find('[data-channel-model]').val(current?.model || '').prop('disabled', true);
+        channelDialog.find('[data-channel-status]').text(current ? `当前 profile：${current.name || current.id} · preset：${current.preset || '默认'}` : '请先在 Connection Manager 创建并选择支持的 profile。');
+    }
+    channelDialog.on('click.nlcChannel', '[data-channel-close],[data-channel-done]', () => channelDialog.attr('hidden', true));
+    channelDialog.on('click.nlcChannel', '[data-channel-manager]', () => { channelDialog.find('[data-channel-status]').text('请关闭此窗并打开酒馆内置 Connection Manager 编辑渠道；NPC Life 不保存 API 密钥。'); });
+    channelDialog.on('click.nlcChannel', '[data-channel-test]', () => { root.find('[data-action="test-secondary-profile"]').trigger('click'); });
     // 处理标签、文件、地图图片、标签编辑和独立试聊提交。
     root.on('change.nlc', '[data-field="map-tag"]', function () { mapTag = $(this).val() || ''; render(); });
     root.on('change.nlc', '[data-field="archive-npc"]', function () { archiveNpc = $(this).val() || ''; render(); });
@@ -197,7 +215,7 @@ export function mountConsole(adapter) {
     // 从旧设置区入口打开指定页签。
     function open(nextTab) { if (typeof nextTab !== 'string') nextTab = undefined; priorFocus = document.activeElement; if (typeof nextTab === 'string') { const mapped = { dynamic: '动态', overview: '动态', contacts: '联系人', map: '地图', archive: '档案', settings: '设置' }[nextTab.toLowerCase()] || nextTab; if (TABS.includes(mapped)) tab = mapped; } minimized = false; root.removeClass('is-minimized').prop('hidden', false); if (!root[0].style.width) clampConsole(root[0]); render(); persist(); }
     // 销毁实例、恢复移动的原工作台节点并移除全部注册监听器。
-    function destroy() { if (destroyed) return; destroyed = true; root.off('.nlc'); cleanups.splice(0).forEach(fn => { try { fn(); } catch (_) {} }); if (oldPanel && oldPanelParent?.isConnected) oldPanelParent.insertBefore(oldPanel, oldPanelNext?.parentNode === oldPanelParent ? oldPanelNext : null); root.remove(); }
+    function destroy() { if (destroyed) return; destroyed = true; root.off('.nlc'); channelDialog.off('.nlcChannel').remove(); cleanups.splice(0).forEach(fn => { try { fn(); } catch (_) {} }); if (oldPanel && oldPanelParent?.isConnected) oldPanelParent.insertBefore(oldPanel, oldPanelNext?.parentNode === oldPanelParent ? oldPanelNext : null); root.remove(); }
     // 初始化持久化几何和页签。
     try { const saved = JSON.parse(localStorage.getItem(CONSOLE_KEY) || 'null'); if (saved && typeof saved === 'object') { if (TABS.includes(saved.tab)) tab = saved.tab; for (const key of ['left','top','width','height']) if (Number.isFinite(saved[key])) root[0].style[key] = `${saved[key]}px`; } } catch (_) {}
     root.css('resize', innerWidth < 620 ? 'none' : 'both'); clampConsole(root[0]); render();

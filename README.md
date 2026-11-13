@@ -31,6 +31,7 @@ manifest.json
 
 - 五页手机式控制台只提供界面和数据入口，不自动替剧情做决定。
 - NPC 模拟、在场判断、地点约束、日志生命周期沿用旧核心思路：系统提供约束，模型负责演绎；不修改角色卡、世界书或主聊天记录。
+- 用户明确写入当前剧情的事实优先于角色卡初始设定：例如正文明确写出逃出监狱，会解除对应的初始囚禁投影；用户愿望、假设和模拟提案不会自动成为正史。正史保留消息来源锚点，消息删除/编辑后可撤销对应投影并恢复基线。
 - 联系人页可查看 NPC 状态和日记。日记目标字数可选 `50`、`200`、`800`、`1600` 或“自定义”。目标是提示参数，不保证输出精确达到该字数。
 - 联系人页的“试聊”是独立后台会话：结果不写入主聊天、不改变世界状态，只有用户主动按按钮才请求模型。
 - 地图页只处理自身确认的地点、`tags` 与路线。导入地图 JSON 后，候选地点和路线必须由用户确认才进入自身目录；目录不写卡。
@@ -76,7 +77,7 @@ manifest.json
 
 主 API 生成使用 `generateRaw`，默认使用 ST 当前选定配置。插件不会通过静默续写接口把主聊天记录带入生成。
 
-ST 副 API 使用已核实的 `ConnectionManagerRequestService` 方法 `getSupportedProfiles` 与 `sendRequest`。使用前，用户需要先在酒馆连接管理器配置连接 profile，再在 NPC Life 设置中选择副 profile 和任务路由。`preset`、`model` 继承所选 profile；插件不保存密钥、不切换主连接。副 API 失败时不会静默回退主 API，界面应显示失败原因。
+ST 副 API 使用已核实的 `ConnectionManagerRequestService` 方法 `getSupportedProfiles` 与 `sendRequest`。使用前，用户需要先在酒馆连接管理器配置连接 profile，再在 NPC Life 设置中选择副 profile 和任务路由。设置页提供类似 Connection Manager 的“编辑副 API 渠道”窗口：展示渠道名、API 类型、地址摘要、模型、温度/最大 token/超时/思考强度/流式/排除参数；密钥和永久地址仍由酒馆 Connection Manager 管理，不写入 NPC Life。`preset`、`model` 继承所选 profile；插件不切换主连接。副 API 失败时不会静默回退主 API，界面应显示失败原因。
 
 模板只附加文本。插件不提供生成前 hard interception，也不能保证主模型遵守注入内容；解析到未知内容时保持未知。
 
