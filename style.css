@@ -51,7 +51,29 @@
 }
 
 .npc-life-settings .menu_button {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    white-space: nowrap;
+    word-break: normal;
+    overflow-wrap: normal;
+    writing-mode: horizontal-tb;
     margin: 0;
+    border-radius: 8px;
+}
+
+/* 旧工作台移入控制台后继续使用自身字段布局与事件。 */
+#npc-life-console .nlc-workbench-body .npc-life-row .text_pole {
+    flex: 1 1 140px;
+    width: auto;
+    min-width: min(140px, 100%);
+}
+
+#npc-life-console .nlc-workbench-body .npc-life-section {
+    padding: 10px;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(128, 128, 128, .35));
+    border-radius: 12px;
 }
 
 .npc-life-settings .menu_button:disabled {

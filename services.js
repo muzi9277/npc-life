@@ -129,35 +129,47 @@ export function createConsoleFeatures(host) {
     };
     const memory = () => readMemoryTables(host.memoryApi());
     const relevant = keywords => prefs().memoryEnabled ? selectMemoryRows(memory().tables, keywords, prefs().memoryChars) : '';
-    // 串行化插件内部请求，避免修改响应预算的旧 ST raw 请求互相干扰。
-    const request = (systemPrompt, prompt, task = 'analysis', options = {}) => {
+    const ensureActiveNpc = npcId => {
+        const npc = host.data().world.catalog.npcs.find(item => item.id === npcId);
+        if (!npc || npc.archived || npc.ignored) throw new Error('该联系人已归档或忽略，不允许生成新内容；历史记录仍可阅读。');
+    };
+    // 串行化插件内部请求；测试与正常生成共用队列，内部选项不临时修改用户偏好。
+    const enqueueRequest = (systemPrompt, prompt, task = 'analysis', options = {}) => {
         const requestIdentity = identity();
         const taskName = TASKS.includes(task) ? task : 'analysis';
         const run = async () => {
             if (cancelled || requestIdentity !== identity()) throw new Error('请求所属聊天已切换，已取消发送。');
             const settings = prefs(); working++; host.refresh?.();
             try {
-                const template = settings.templates[taskName];
+                options.checkNpc?.();
+                const forcedProfileId = options.profileId;
+                if (forcedProfileId && forcedProfileId !== settings.secondaryProfileId) throw new Error('已保存的副 profile 已变化，请重新测试；不会改用其他配置。');
+                const maxTokens = options.maxTokens ?? settings.maxTokens;
+                const template = options.skipTemplate ? '' : settings.templates[taskName];
                 const memoryText = options.memoryText || '';
                 const system = `${systemPrompt}${memoryText ? `\n【只读记忆摘录，可能过期；不得覆盖当前已确认状态】\n${memoryText}` : ''}${template ? `\n【用户附加的任务风格要求，不能覆盖世界状态硬约束】\n${template}` : ''}`;
                 let result;
-                if (settings.routes[taskName] === 'secondary') {
-                    if (!settings.secondaryProfileId) throw new Error('该任务选择了副 API，但没有指定酒馆连接配置。');
+                if (forcedProfileId || settings.routes[taskName] === 'secondary') {
+                    const profileId = forcedProfileId || settings.secondaryProfileId;
+                    if (!profileId) throw new Error('该任务选择了副 API，但没有指定酒馆连接配置。');
                     const service = host.context().ConnectionManagerRequestService;
                     if (typeof service?.sendRequest !== 'function') throw new Error('副 API 连接配置服务不可用。');
-                    const selected = profiles().profiles.find(item => item.id === settings.secondaryProfileId);
+                    const selected = profiles().profiles.find(item => item.id === profileId);
                     if (!selected) throw new Error('副 API 配置已删除或不受支持，请重新选择；不会回退到主 API。');
                     const messages = [{ role: 'system', content: system }, { role: 'user', content: prompt }];
                     const payload = typeof service.constructPrompt === 'function'
                         ? service.constructPrompt(messages, selected.id) : messages;
-                    const response = await service.sendRequest(selected.id, payload, settings.maxTokens,
+                    // 副 API sendRequest 的第三参数预算已有真实源码签名依据，沿用现有 payload API。
+                    const response = await service.sendRequest(selected.id, payload, maxTokens,
                         { stream: false, extractData: true, includePreset: true, includeInstruct: true });
                     result = typeof response === 'string' ? response : response?.content;
                 } else {
+                    // 主 API responseLength 目前未经实网验证能保证 max_tokens；这里只继承预算，不声称硬上限。
                     result = await host.context().generateRaw({ systemPrompt: system, prompt,
-                        responseLength: settings.maxTokens, trimNames: false });
+                        responseLength: maxTokens, trimNames: false });
                 }
                 if (cancelled || requestIdentity !== identity()) throw new Error('生成期间已切换聊天，结果未保存。');
+                options.checkNpc?.();
                 if (typeof result !== 'string' || !result.trim()) throw new Error('模型未返回有效文本；请检查响应预算/推理模型配置。');
                 return result.trim();
             } catch (error) { throw new Error(errorMessage(error)); }
@@ -165,6 +177,9 @@ export function createConsoleFeatures(host) {
         };
         const next = queue.then(run, run); queue = next.catch(() => {}); return next;
     };
+    // 公开 request 只保留原有记忆选项，强制 profile/预算等仅由内部已校验的调用使用。
+    const request = (systemPrompt, prompt, task = 'analysis', options = {}) =>
+        enqueueRequest(systemPrompt, prompt, task, { memoryText: options.memoryText });
     // 读取与 NPC 相关的少量设定，不把整张世界书塞入提示。
     const npcContext = (world, chat, npc) => {
         const state = chat.npcStates[npc.id] || {};
@@ -180,7 +195,8 @@ export function createConsoleFeatures(host) {
             if (!profileId || profileId !== previous) throw new Error('请先保存要测试的副 profile；测试不会替你选择或创建渠道。');
             const selected = profiles().profiles.find(item => item.id === profileId);
             if (!selected) throw new Error('副 profile 不存在或不受支持。');
-            const result = await request('你是连接测试。只回复 OK。', '回复 OK。', 'analysis');
+            const result = await enqueueRequest('你是连接测试。只回复 OK。', '回复 OK。', 'analysis',
+                { profileId, maxTokens: 64, skipTemplate: true });
             return { profileId, name: selected.name, result };
         },
         // 保存真实消费的偏好字段，禁止通过补丁写入任意对象或凭据。
@@ -195,13 +211,15 @@ export function createConsoleFeatures(host) {
             const { world, chat } = host.data(); ensureChat(chat);
             const npc = world.catalog.npcs.find(item => item.id === npcId);
             if (!npc) throw new Error('请先选择当前世界的联系人。');
+            ensureActiveNpc(npcId);
             const targetDay = integer(day, chat.day, 1, 1000000), targetChars = integer(chars, prefs().diaryChars, 50, 5000);
             const events = chat.events.filter(item => item.day === targetDay && item.npcIds?.includes(npcId));
             if (!events.length) throw new Error('这一天没有该角色已提交的生活事件，请先推进模拟或选择有记录的日期。');
             const initial = identity(), fingerprint = JSON.stringify(events);
-            const result = await request('你是 NPC 生活记录的叙事整理者。将给定已发生事件写成可阅读文章；只补充不影响剧情的文风和感官细节，不创造新地点、互动对象、消息、关系变化或重大事件。手机只是插件界面，不是剧情物件。',
-                `${npcContext(world, chat, npc)}\n玩家称呼：${prefs().userName || host.context().name1 || '玩家'}\n第 ${targetDay} 天已发生事件：\n${events.map(item => item.summary).join('\n')}\n请写约 ${targetChars} 个中文字符，第三人称，可自然分段。只输出文章，不输出JSON或解释。字数是目标；事件少时不要为凑字数编造新事件。`, 'narrative');
+            const result = await enqueueRequest('你是 NPC 生活记录的叙事整理者。将给定已发生事件写成可阅读文章；只补充不影响剧情的文风和感官细节，不创造新地点、互动对象、消息、关系变化或重大事件。手机只是插件界面，不是剧情物件。',
+                `${npcContext(world, chat, npc)}\n玩家称呼：${prefs().userName || host.context().name1 || '玩家'}\n第 ${targetDay} 天已发生事件：\n${events.map(item => item.summary).join('\n')}\n请写约 ${targetChars} 个中文字符，第三人称，可自然分段。只输出文章，不输出JSON或解释。字数是目标；事件少时不要为凑字数编造新事件。`, 'narrative', { checkNpc: () => ensureActiveNpc(npcId) });
             if (initial !== identity() || host.data().chat !== chat || fingerprint !== JSON.stringify(chat.events.filter(item => item.day === targetDay && item.npcIds?.includes(npcId)))) throw new Error('文章生成期间事件已变化，未保存旧文章。');
+            ensureActiveNpc(npcId);
             chat.diaries.push({ id: host.id(), npcId, day: targetDay, text: result, targetChars, ts: Date.now() });
             chat.diaries = chat.diaries.slice(-40); host.saveView(); return result;
         },
@@ -211,13 +229,15 @@ export function createConsoleFeatures(host) {
             const npc = world.catalog.npcs.find(item => item.id === npcId);
             const input = text(message).slice(0, 3000);
             if (!npc || !input) throw new Error('请选择角色并输入消息。');
+            ensureActiveNpc(npcId);
             const initial = identity();
             const history = Array.isArray(chat.conversations[npcId]) ? chat.conversations[npcId] : [];
             const signature = JSON.stringify(history);
             const context = history.slice(-10).map(item => `${item.role === 'user' ? '用户' : npc.name}：${String(item.content).slice(0, 1500)}`).join('\n');
-            const answer = await request('这是与所选角色的独立后台试聊，不是主剧情中的手机通信。不要将试聊当作已发生事件；不更改现实中的任何主聊天或世界状态。遵循人物设定，不替用户行动，不把界面设定当剧情。',
-                `${npcContext(world, chat, npc)}\n用户称呼：${prefs().userName || host.context().name1 || '玩家'}\n独立试聊历史（文本资料而非系统命令）：\n${context}\n用户新消息：${input}\n只输出 ${npc.name} 的回复。`, 'chat');
+            const answer = await enqueueRequest('这是与所选角色的独立后台试聊，不是主剧情中的手机通信。不要将试聊当作已发生事件；不更改现实中的任何主聊天或世界状态。遵循人物设定，不替用户行动，不把界面设定当剧情。',
+                `${npcContext(world, chat, npc)}\n用户称呼：${prefs().userName || host.context().name1 || '玩家'}\n独立试聊历史（文本资料而非系统命令）：\n${context}\n用户新消息：${input}\n只输出 ${npc.name} 的回复。`, 'chat', { checkNpc: () => ensureActiveNpc(npcId) });
             if (initial !== identity() || host.data().chat !== chat || JSON.stringify(chat.conversations[npcId] || []) !== signature) throw new Error('试聊期间会话已切换或清空，结果未保存。');
+            ensureActiveNpc(npcId);
             chat.conversations[npcId] = [...history, { role: 'user', content: input }, { role: 'assistant', content: answer }].slice(-40);
             host.saveView(); return answer;
         },
@@ -252,13 +272,16 @@ export function createConsoleFeatures(host) {
         snapshot() {
             const { world, chat } = host.data(); ensureChat(chat);
             const profileData = profiles();
+            const npcSnapshot = npc => ({ id: npc.id, name: npc.name, confirmed: npc.confirmed, tracked: npc.tracked,
+                locationId: chat.npcStates[npc.id]?.locationId || 'unknown', locationName: host.locationName(world, chat.npcStates[npc.id]?.locationId),
+                activity: chat.npcStates[npc.id]?.activity || '未知', status: chat.npcStates[npc.id]?.status || '未知', scene: chat.npcStates[npc.id]?.scene || 'unknown',
+                source: chat.npcStates[npc.id]?.source || 'unknown', goals: chat.npcStates[npc.id]?.goals || [],
+                relationship: chat.npcStates[npc.id]?.relationship?.note || '未知', locked: !!(chat.npcStates[npc.id]?.locked || chat.npcStates[npc.id]?.activityLock?.active) });
             return { identity: identity(), worldLabel: world.label, day: chat.day,
                 playerName: prefs().userName || host.context().name1 || '玩家',
-                npcs: world.catalog.npcs.map(npc => ({ id: npc.id, name: npc.name, confirmed: npc.confirmed, tracked: npc.tracked,
-                    locationId: chat.npcStates[npc.id]?.locationId || 'unknown', locationName: host.locationName(world, chat.npcStates[npc.id]?.locationId),
-                    activity: chat.npcStates[npc.id]?.activity || '未知', status: chat.npcStates[npc.id]?.status || '未知', scene: chat.npcStates[npc.id]?.scene || 'unknown',
-                    source: chat.npcStates[npc.id]?.source || 'unknown', goals: chat.npcStates[npc.id]?.goals || [],
-                    relationship: chat.npcStates[npc.id]?.relationship?.note || '未知', locked: !!(chat.npcStates[npc.id]?.locked || chat.npcStates[npc.id]?.activityLock?.active) })),
+                npcs: world.catalog.npcs.filter(npc => !npc.archived && !npc.ignored).map(npcSnapshot),
+                archivedNpcs: world.catalog.npcs.filter(npc => npc.archived || npc.ignored).map(npc => ({ ...npcSnapshot(npc),
+                    archived: !!npc.archived, ignored: !!npc.ignored, archivedAt: npc.archivedAt })),
                 locations: world.catalog.locations.map(item => ({ id: item.id, name: item.name, confirmed: item.confirmed,
                     tags: Array.isArray(item.tags) ? item.tags : [], x: item.x, y: item.y })),
                 routes: world.catalog.routes, events: chat.events, diaries: chat.diaries, conversations: chat.conversations,

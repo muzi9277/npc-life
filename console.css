@@ -1,100 +1,115 @@
 #npc-life-console.nlc {
-    --nlc-border: var(--SmartThemeBorderColor, rgba(128, 128, 128, .5));
-    --nlc-bg: var(--SmartThemeBlurTintColor, var(--SmartThemeBodyColor, #202124));
-    --nlc-text: var(--SmartThemeBodyColor, inherit);
-    --nlc-soft: var(--black30a, rgba(0, 0, 0, .16));
-    position: fixed;
-    z-index: 10040;
-    display: flex;
-    flex-direction: column;
-    min-width: 360px;
-    min-height: 300px;
-    max-width: calc(100vw - 16px);
-    max-height: calc(100vh - 16px);
-    overflow: hidden;
-    resize: both;
-    border: 1px solid var(--nlc-border);
-    border-radius: 7px;
-    color: var(--nlc-text);
-    background: var(--nlc-bg);
-    box-shadow: 0 8px 28px rgba(0, 0, 0, .35);
+    --nlc-border: var(--SmartThemeBorderColor, rgba(128,128,128,.35));
+    --nlc-bg: var(--SmartThemeBlurTintColor, #202124);
+    --nlc-text: var(--SmartThemeBodyColor, #e6e6e6);
+    --nlc-soft: var(--black30a, rgba(0,0,0,.12));
+    container: nlc / inline-size;
+    position:fixed; z-index:10040; display:flex; flex-direction:column;
+    width:560px; height:640px; min-width:min(360px,calc(100vw - 16px)); min-height:min(300px,calc(100vh - 16px));
+    max-width:calc(100vw - 16px); max-height:calc(100vh - 16px); overflow:hidden; resize:both;
+    border:1px solid var(--nlc-border); border-radius:14px; color:var(--nlc-text); background:var(--nlc-bg);
+    box-shadow:0 12px 36px rgba(0,0,0,.32); font-size:14px; line-height:1.45; text-align:left; writing-mode:horizontal-tb;
 }
-#npc-life-console[hidden] { display: none !important; }
-#npc-life-console, #npc-life-console * { box-sizing: border-box; }
-#npc-life-console .nlc-bar { display:flex; flex:0 0 auto; align-items:center; gap:12px; min-height:42px; padding:5px 8px 5px 12px; border-bottom:1px solid var(--nlc-border); cursor:grab; touch-action:none; user-select:none; }
+#npc-life-console[hidden], #npc-life-console [hidden], .nlc-channel-overlay[hidden] { display:none !important; }
+#npc-life-console, #npc-life-console *, .nlc-channel-overlay, .nlc-channel-overlay * { box-sizing:border-box; }
+#npc-life-console .menu_button, .nlc-channel-dialog .menu_button, .nlc-body-entry {
+    display:inline-flex; flex:0 0 auto; align-items:center; justify-content:center; width:auto;
+    white-space:nowrap; word-break:normal; overflow-wrap:normal; writing-mode:horizontal-tb;
+    margin:0; padding:6px 11px; min-height:32px; line-height:1.3; border-radius:8px;
+}
+#npc-life-console button:focus-visible, #npc-life-console summary:focus-visible, .nlc-channel-dialog button:focus-visible,
+#npc-life-console .text_pole:focus-visible { outline:2px solid var(--SmartThemeQuoteColor,#83bca2); outline-offset:2px; }
+#npc-life-console .nlc-bar { display:flex; flex:0 0 auto; align-items:center; flex-wrap:nowrap; gap:8px; min-height:46px; padding:7px 9px 7px 13px; border-bottom:1px solid var(--nlc-border); cursor:grab; touch-action:none; user-select:none; }
 #npc-life-console .nlc-bar:active { cursor:grabbing; }
-#npc-life-console .nlc-world { flex:1; overflow:hidden; opacity:.75; text-overflow:ellipsis; white-space:nowrap; font-size:.88em; }
-#npc-life-console .nlc-controls, #npc-life-console .nlc-tabs, #npc-life-console .nlc-row { display:flex; align-items:center; flex-wrap:wrap; gap:7px; }
-#npc-life-console .nlc-controls .menu_button { min-width:30px; padding:3px 8px; margin:0; }
-#npc-life-console .nlc-tabs { flex:0 0 auto; padding:7px 10px 0; border-bottom:1px solid var(--nlc-border); }
-#npc-life-console .nlc-tabs .menu_button { margin:0; border-radius:4px 4px 0 0; }
-#npc-life-console .nlc-tabs .is-active { border-bottom:2px solid var(--SmartThemeQuoteColor, #6c9); }
-#npc-life-console .nlc-status { flex:0 0 auto; min-height:0; padding:0 14px; font-size:.86em; }
-#npc-life-console .nlc-status:not(:empty) { padding-top:7px; }
-#npc-life-console .nlc-status.is-error, #npc-life-console .nlc-error { color:var(--SmartThemeEmColor, #e77); }
-#npc-life-console .nlc-pages { flex:1 1 auto; min-height:0; overflow:auto; padding:12px 14px 18px; }
+#npc-life-console .nlc-bar > strong { flex:0 0 auto; white-space:nowrap; }
+#npc-life-console .nlc-version { flex:0 0 auto; opacity:.6; font-size:10px; white-space:nowrap; }
+#npc-life-console .nlc-world { flex:1 1 auto; min-width:0; overflow:hidden; opacity:.72; text-overflow:ellipsis; white-space:nowrap; font-size:.85em; }
+#npc-life-console .nlc-controls { display:flex; flex:0 0 auto; flex-wrap:nowrap; gap:4px; margin-left:auto; }
+#npc-life-console .nlc-controls .menu_button { min-width:28px; min-height:28px; padding:3px 6px; }
+#npc-life-console .nlc-tabs { display:flex; flex:0 0 auto; flex-wrap:nowrap; align-items:center; gap:6px; overflow-x:auto; padding:9px 12px; border-bottom:1px solid var(--nlc-border); scrollbar-width:thin; }
+#npc-life-console .nlc-tabs .menu_button { flex-shrink:0; border-radius:8px; min-height:34px; }
+#npc-life-console .nlc-tabs .is-active { background:var(--nlc-soft); box-shadow:inset 0 -2px var(--SmartThemeQuoteColor,#83bca2); }
+#npc-life-console .nlc-status { flex:0 0 auto; min-height:0; padding:0 14px; font-size:.86em; overflow-wrap:anywhere; }
+#npc-life-console .nlc-status:not(:empty) { padding-top:8px; }
+#npc-life-console .nlc-status.is-error, #npc-life-console .nlc-error, .nlc-channel-dialog .is-error { color:var(--SmartThemeEmColor,#e88); }
+#npc-life-console .nlc-pages { flex:1 1 auto; min-width:0; min-height:0; overflow:auto; overscroll-behavior:contain; padding:14px; scrollbar-gutter:stable; }
 #npc-life-console .nlc-page { min-width:0; }
-#npc-life-console h2 { margin:.2em 0 .5em; font-size:1.25em; }
-#npc-life-console h3 { margin:1em 0 .45em; font-size:1em; }
-#npc-life-console p { line-height:1.5; overflow-wrap:anywhere; }
-#npc-life-console .nlc-muted { opacity:.72; font-size:.9em; }
-#npc-life-console .nlc-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(240px,100%),1fr)); gap:9px; }
-#npc-life-console .nlc-item { min-width:0; margin:4px 0; padding:9px; border:1px solid var(--nlc-border); border-radius:4px; overflow-wrap:anywhere; }
-#npc-life-console .nlc-item h3, #npc-life-console .nlc-item p { margin:3px 0 7px; }
-#npc-life-console .nlc-workbench, #npc-life-console .nlc-memory, #npc-life-console .nlc-settings > details { margin-top:12px; }
+#npc-life-console h2 { margin:0 0 8px; font-size:1.2em; }
+#npc-life-console h3 { margin:0 0 10px; font-size:1em; font-weight:650; }
+#npc-life-console p { line-height:1.6; overflow-wrap:anywhere; margin:7px 0; }
+#npc-life-console .nlc-muted, .nlc-channel-dialog .nlc-muted { opacity:.72; font-size:.88em; line-height:1.6; }
+#npc-life-console .nlc-empty { margin:8px 0; padding:10px 12px; border-radius:9px; background:var(--nlc-soft); opacity:.8; font-size:.9em; }
+#npc-life-console .nlc-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(220px,100%),1fr)); gap:10px; }
+#npc-life-console .nlc-card, #npc-life-console .nlc-item { min-width:0; padding:13px; border:1px solid var(--nlc-border); border-radius:12px; overflow-wrap:anywhere; }
+#npc-life-console .nlc-card { margin:0 0 12px; }
+#npc-life-console .nlc-item { margin:6px 0; background:var(--nlc-soft); }
+#npc-life-console .nlc-item h3, #npc-life-console .nlc-item p { margin:3px 0 8px; }
+#npc-life-console .nlc-workbench { margin-top:14px; border-top:1px solid var(--nlc-border); padding-top:6px; }
 #npc-life-console summary { cursor:pointer; user-select:none; padding:6px 0; }
-#npc-life-console .nlc-workbench-body { padding-top:8px; }
-#npc-life-console .nlc-contact { display:grid; grid-template-columns:minmax(130px, .28fr) minmax(0,1fr); gap:14px; }
-#npc-life-console .nlc-roster { display:flex; flex-direction:column; align-items:stretch; gap:5px; max-height:100%; overflow:auto; }
-#npc-life-console .nlc-roster .menu_button { margin:0; text-align:left; overflow-wrap:anywhere; }
-#npc-life-console .nlc-roster .is-active { outline:1px solid var(--SmartThemeQuoteColor, #6c9); }
+#npc-life-console .nlc-workbench-body { padding-top:8px; min-width:0; }
+#npc-life-console .nlc-contact { display:grid; grid-template-columns:150px minmax(0,1fr); gap:14px; align-items:start; }
+#npc-life-console .nlc-roster { display:flex; flex-direction:column; align-items:stretch; gap:6px; min-width:0; max-height:520px; overflow:auto; }
+#npc-life-console .nlc-roster .menu_button { display:block; flex-shrink:0; max-width:100%; text-align:left; overflow:hidden; text-overflow:ellipsis; }
+#npc-life-console .nlc-roster .is-active { background:var(--nlc-soft); box-shadow:inset 3px 0 var(--SmartThemeQuoteColor,#83bca2); }
 #npc-life-console .nlc-detail { min-width:0; }
-#npc-life-console .nlc-field { display:flex; flex-direction:column; gap:4px; min-width:min(180px,100%); flex:1 1 180px; margin:5px 0; }
-#npc-life-console .nlc-field > span, #npc-life-console .nlc-row label { font-size:.88em; }
-#npc-life-console .text_pole { min-width:0; max-width:100%; }
-#npc-life-console .nlc-row > label { display:flex; align-items:center; gap:6px; }
-#npc-life-console .nlc-list { display:flex; flex-direction:column; gap:5px; max-height:250px; overflow:auto; }
-#npc-life-console .nlc-list-row { padding:7px 9px; text-align:left; overflow-wrap:anywhere; }
-#npc-life-console .nlc-reading, #npc-life-console .nlc-bubble { margin:7px 0; padding:9px; border-radius:4px; background:var(--nlc-soft); overflow-wrap:anywhere; }
+#npc-life-console .nlc-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px 12px; }
+#npc-life-console .nlc-field { display:flex; flex-direction:column; gap:5px; min-width:0; margin:6px 0 10px; }
+#npc-life-console .nlc-field > span { font-size:.88em; opacity:.83; }
+#npc-life-console .text_pole { display:block; width:100%; min-width:0; max-width:100%; margin:0; padding:8px 10px; border-radius:8px; font:inherit; }
+#npc-life-console textarea.text_pole { resize:vertical; min-height:76px; }
+#npc-life-console .checkbox_label { display:flex; align-items:center; gap:8px; margin:6px 0 12px; }
+#npc-life-console .checkbox_label input { flex:0 0 auto; }
+#npc-life-console .nlc-row { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin:8px 0; min-width:0; }
+#npc-life-console .nlc-list { display:flex; flex-direction:column; gap:6px; max-height:250px; overflow:auto; margin-top:10px; }
+#npc-life-console .nlc-list-row { flex:0 0 auto; width:100%; padding:9px 11px; border:1px solid var(--nlc-border); border-radius:8px; text-align:left; white-space:normal; overflow-wrap:anywhere; color:inherit; background:var(--nlc-soft); cursor:pointer; }
+#npc-life-console .nlc-reading, #npc-life-console .nlc-bubble { margin:7px 0; padding:11px; border-radius:10px; background:var(--nlc-soft); overflow-wrap:anywhere; }
 #npc-life-console .nlc-reading p { white-space:pre-wrap; }
-#npc-life-console .nlc-chat { display:flex; flex-direction:column; gap:5px; max-height:230px; overflow:auto; padding:5px 0; }
-#npc-life-console .nlc-bubble { max-width:90%; white-space:pre-wrap; }
+#npc-life-console .nlc-chat { display:flex; flex-direction:column; gap:5px; max-height:260px; overflow:auto; }
+#npc-life-console .nlc-chat:empty { display:none; }
+#npc-life-console .nlc-bubble { max-width:92%; white-space:pre-wrap; }
 #npc-life-console .nlc-bubble.from-user { align-self:flex-end; }
 #npc-life-console .nlc-bubble.from-npc { align-self:flex-start; }
-#npc-life-console .nlc-map { position:relative; min-height:260px; margin:10px 0; border:1px solid var(--nlc-border); border-radius:4px; background-color:var(--nlc-soft); background-position:center; background-size:contain; background-repeat:no-repeat; overflow:hidden; }
-#npc-life-console .nlc-map-node { position:absolute; transform:translate(-50%,-50%); max-width:140px; padding:4px 7px; border:1px solid var(--nlc-border); border-radius:4px; background:var(--nlc-bg); text-align:center; overflow-wrap:anywhere; font-size:.85em; }
-#npc-life-console .nlc-locations { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(240px,100%),1fr)); gap:7px; margin-top:12px; }
-#npc-life-console .nlc-location { display:flex; flex-direction:column; gap:4px; min-width:0; }
-#npc-life-console .nlc-upload { display:inline-flex; align-items:center; margin:0; cursor:pointer; }
+#npc-life-console .nlc-map { position:relative; min-height:250px; margin:12px 0; border:1px solid var(--nlc-border); border-radius:12px; background-color:var(--nlc-soft); background-position:center; background-size:contain; background-repeat:no-repeat; overflow:hidden; }
+#npc-life-console .nlc-map-node { position:absolute; transform:translate(-50%,-50%); max-width:140px; padding:4px 7px; border:1px solid var(--nlc-border); border-radius:6px; background:var(--nlc-bg); text-align:center; overflow-wrap:anywhere; font-size:.85em; }
+#npc-life-console .nlc-locations { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(230px,100%),1fr)); gap:10px; margin:12px 0; }
+#npc-life-console .nlc-upload { cursor:pointer; }
 #npc-life-console .nlc-pre { max-height:280px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
-#npc-life-console .nlc-presets, #npc-life-console .nlc-routes, #npc-life-console.nlc-settings { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(220px,100%),1fr)); gap:7px; }
-#npc-life-console.nlc-settings > .checkbox_label { align-self:center; }
-#npc-life-console .nlc-fab, .nlc-body-entry { position:fixed; z-index:10039; right:14px; bottom:14px; margin:0; box-shadow:0 3px 12px rgba(0,0,0,.25); }
-#npc-life-console .nlc-fab { display:none; }
-#npc-life-console.is-minimized { height:44px !important; min-height:0; resize:none; }
+#npc-life-console .nlc-save-row { margin:12px 0 18px; }
+.nlc-body-entry { position:fixed; z-index:10039; right:14px; bottom:14px; box-shadow:0 3px 12px rgba(0,0,0,.25); }
+#npc-life-console.is-minimized { height:46px !important; min-height:0; resize:none !important; }
 #npc-life-console.is-minimized .nlc-tabs, #npc-life-console.is-minimized .nlc-status, #npc-life-console.is-minimized .nlc-pages { display:none; }
-#npc-life-console.is-maximized { left:8px !important; top:8px !important; width:calc(100vw - 16px) !important; height:calc(100vh - 16px) !important; resize:none; }
-#npc-life-console.is-busy [data-action], #npc-life-console.has-global-busy [data-action] { opacity:.65; }
-#npc-life-console.is-busy [data-action="diary"], #npc-life-console.is-busy [data-action="chat-send"], #npc-life-console.is-busy [data-action="save-preferences"] { pointer-events:none; }
-@media (max-width:620px) {
-    #npc-life-console.nlc { min-width:0; min-height:0; max-width:none; max-height:none; resize:none; }
+#npc-life-console.is-maximized { left:8px !important; top:8px !important; width:calc(100vw - 16px) !important; height:calc(100vh - 16px) !important; resize:none !important; }
+#npc-life-console.is-busy [data-action], #npc-life-console.has-global-busy [data-action] { opacity:.7; }
+#npc-life-console button:disabled, .nlc-channel-dialog button:disabled { opacity:.5; cursor:not-allowed; }
+/* 布局断点基于面板实际宽度，桌面窄窗也使用单列联系人。 */
+@container nlc (max-width:600px) {
     #npc-life-console .nlc-contact { grid-template-columns:minmax(0,1fr); }
-    #npc-life-console .nlc-roster { flex-direction:row; flex-wrap:nowrap; max-height:72px; }
-    #npc-life-console .nlc-roster .menu_button { flex:0 0 auto; }
-    #npc-life-console .nlc-tabs { overflow-x:auto; flex-wrap:nowrap; }
-    #npc-life-console .nlc-map { min-height:210px; }
-    #npc-life-console .nlc-fab { display:block; }
+    #npc-life-console .nlc-roster { flex-direction:row; flex-wrap:nowrap; max-height:64px; padding:2px 2px 6px; }
+    #npc-life-console .nlc-roster:empty { display:none; }
+    #npc-life-console .nlc-roster .menu_button { max-width:220px; }
+    #npc-life-console .nlc-world { display:none; }
+}
+@container nlc (max-width:400px) {
+    #npc-life-console .nlc-pages { padding:10px; }
+    #npc-life-console .nlc-form-grid { grid-template-columns:minmax(0,1fr); }
+    #npc-life-console .nlc-version { display:none; }
+    #npc-life-console .nlc-bar { gap:6px; padding:7px 8px; }
+    #npc-life-console .nlc-card, #npc-life-console .nlc-item { padding:11px; }
+    #npc-life-console .nlc-tabs { gap:4px; padding:8px; }
+    #npc-life-console .nlc-tabs .menu_button { flex:1 0 auto; padding:6px; font-size:12px; }
+}
+@media (max-width:619px) {
+    #npc-life-console.nlc { min-width:0; min-height:0; resize:none; }
+    #npc-life-console .nlc-bar { cursor:default; touch-action:auto; }
     .nlc-body-entry { right:12px; bottom:12px; }
 }
-
-.nlc-channel-overlay[hidden] { display:none !important; }
-.nlc-channel-overlay { position:fixed; inset:0; z-index:10060; display:flex; align-items:center; justify-content:center; background:rgba(20,24,34,.38); }
-.nlc-channel-dialog { width:min(520px,calc(100vw - 24px)); max-height:calc(100vh - 24px); overflow:auto; border:1px solid var(--SmartThemeBorderColor,rgba(128,128,128,.5)); border-radius:12px; color:var(--SmartThemeBodyColor,inherit); background:var(--SmartThemeBlurTintColor,#f4f2ef); box-shadow:0 18px 48px rgba(0,0,0,.4); }
-.nlc-channel-dialog > header { display:flex; justify-content:space-between; align-items:center; padding:16px 18px; border-bottom:1px solid var(--SmartThemeBorderColor,rgba(128,128,128,.35)); }
-.nlc-channel-body { padding:14px 18px 18px; }
-.nlc-channel-body > label { display:flex; flex-direction:column; gap:5px; margin:10px 0; }
-.nlc-channel-body input { min-width:0; }
-.nlc-channel-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; }
-.nlc-channel-grid label { display:flex; flex-direction:column; gap:5px; font-size:.85em; }
+.nlc-channel-overlay { position:fixed; inset:0; z-index:10060; display:flex; align-items:center; justify-content:center; padding:12px; background:rgba(0,0,0,.42); }
+.nlc-channel-dialog { width:min(500px,100%); max-height:calc(100vh - 24px); overflow:auto; border:1px solid var(--SmartThemeBorderColor,rgba(128,128,128,.4)); border-radius:14px; color:var(--SmartThemeBodyColor,#e6e6e6); background:var(--SmartThemeBlurTintColor,#202124); box-shadow:0 18px 48px rgba(0,0,0,.4); line-height:1.6; text-align:left; }
+.nlc-channel-dialog > header { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:13px 16px; border-bottom:1px solid var(--SmartThemeBorderColor,rgba(128,128,128,.35)); }
+.nlc-channel-dialog > header b { min-width:0; overflow-wrap:anywhere; }
+.nlc-channel-body { padding:14px 16px 18px; overflow-wrap:anywhere; }
+.nlc-profile-details { display:grid; grid-template-columns:max-content minmax(0,1fr); gap:8px 14px; margin:0 0 14px; }
+.nlc-profile-details dt { opacity:.65; }
+.nlc-profile-details dd { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; }
 .nlc-channel-actions { display:flex; justify-content:flex-end; gap:8px; flex-wrap:wrap; margin-top:16px; }
-@media (max-width:620px) { .nlc-channel-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+.nlc-channel-dialog .nlc-status { margin-top:12px; font-size:.9em; white-space:pre-wrap; }

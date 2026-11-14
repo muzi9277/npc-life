@@ -1,12 +1,34 @@
 # 测试说明
 
-版本目标：`3.0.0-beta.1`，运行环境：SillyTavern `1.17.0`。
+版本目标：`3.0.0-beta.2`，运行环境：SillyTavern `1.17.0`。
+
+## 本地自动回归
+
+运行时扩展仍无依赖、无构建。测试不调用真实 API，`core` 和 `services` 使用虚构上下文与 mock：
+
+```sh
+node tests/core.test.mjs
+node --test tests/services.test.mjs
+```
+
+UI 测试需开发环境安装 `happy-dom`；启用真实布局检查还需 `playwright` 和本机 Edge。通过 `ST_ROOT` 指向本机 SillyTavern 源目录，用于读取宿主随附 jQuery：
+
+```sh
+ST_ROOT=/path/to/SillyTavern node --test tests/console.test.mjs
+ST_ROOT=/path/to/SillyTavern UI_LAYOUT=1 node --test tests/console.test.mjs
+```
+
+默认只执行 DOM 行为检查；`UI_LAYOUT=1` 才运行实际布局检查。可用 `UI_HAPPY_DOM`、`UI_PLAYWRIGHT` 提供已安装模块的 file URL，`UI_BROWSER_CHANNEL` 指定浏览器通道（默认 `msedge`）。Happy DOM 只执行本机项目源码及宿主 jQuery，不用于运行用户脚本。
+
+测试源码位于 `tests/`。核心覆盖软删/忽略/恢复、扫描墓碑、世界与聊天隔离、旅行、模拟失败事务、消息锚点、字段版本撤销、后续修改保留及旧数据待复核。服务覆盖副连接强制测试路由、串行队列、64 token 测试预算、无静默回退、切身份与归档期间不提交旧内容。UI 覆盖五页切换、草稿、取消、归档恢复入口、空地图、连接详情、工作台节点复挂与清理。
+
+真实渲染另用本地虚构 fixture 在 Edge/Chromium 检查默认560×640、桌面360/480/720宽度及手机宽度，验证容器单双列、按钮不换行和横向溢出。该 fixture 不连接酒馆用户数据，不能代替完整 ST 页面联调。
 
 ## 测试范围
 
 ### 浏览器 UI 测试
 
-安装包含以下 6 个运行文件：`index.js`、`style.css`、`console.js`、`console.css`、`services.js`、`manifest.json`。在浏览器加载扩展后执行 `Ctrl+F5`，确认扩展设置可打开，五页手机式控制台可切换，版本条诊断显示 `3.0.0-beta.1`。`services.js` 的职责包括 API 分流、只读记忆、独立后台试聊和地图导入。
+安装包含以下 6 个运行文件：`index.js`、`style.css`、`console.js`、`console.css`、`services.js`、`manifest.json`。在浏览器加载扩展后执行 `Ctrl+F5`，确认扩展设置可打开，五页手机式控制台可切换，版本条诊断显示 `3.0.0-beta.2`。`services.js` 的职责包括 API 分流、只读记忆、独立后台试聊和地图导入。
 
 逐项检查：
 
