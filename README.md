@@ -1,6 +1,6 @@
 # NPC Life 角色生活
 
-版本：`3.0.0-beta.4`
+版本：`3.0.0-beta.5`
 目标环境：SillyTavern `1.17.0`（ST1.17.0）  
 作者：木子 （使用了gpt6.1 sol做的）
 
@@ -28,7 +28,7 @@ world-service.js
 manifest.json
 ```
 
-其中 `index.js` 是运行入口；`services.js` 负责 API 分流、只读记忆、独立后台试聊和地图导入；以包内 `manifest.json` 的实际声明为准。安装或更新后在浏览器执行 `Ctrl+F5`，打开扩展设置，确认版本条诊断显示 `3.0.0-beta.4`。本项目无 npm 依赖、无打包步骤、无后端。
+其中 `index.js` 是运行入口；`services.js` 负责 API 分流、只读记忆、独立后台试聊和地图导入；以包内 `manifest.json` 的实际声明为准。安装或更新后在浏览器执行 `Ctrl+F5`，打开扩展设置，确认版本条诊断显示 `3.0.0-beta.5`。本项目无 npm 依赖、无打包步骤、无后端。
 
 ## 功能边界
 

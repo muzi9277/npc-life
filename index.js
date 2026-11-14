@@ -1,4 +1,4 @@
-/* NPC Life 3.0.0-beta.4：手机式控制台只是管理界面，不是剧情中的手机。 */
+/* NPC Life 3.0.0-beta.5：手机式控制台只是管理界面，不是剧情中的手机。 */
 // 已核对 ST 1.17.0 public/script.js 的真实枚举导出和深度注入签名。
 import { extension_prompt_types, extension_prompt_roles, isGenerating } from '../../../../script.js';
 import { mountConsole } from './console.js';
@@ -7,7 +7,7 @@ import { createAutomationScheduler } from './automation.js';
 import { timelineContext } from './timeline.js';
 import { createWorldService } from './world-service.js';
 
-const RELEASE_VERSION = '3.0.0-beta.4';
+const RELEASE_VERSION = '3.0.0-beta.5';
 
 const MODULE_NAME = 'npc-life';
 const ROOT = '#npc-life-settings';
@@ -38,6 +38,62 @@ let consoleView = null;
 let consoleFeatures = null;
 let automationScheduler = null;
 let worldService = null;
+
+const ROLE_ONLY = /^(?:室友|舍友|老板|守卫|船夫|骑士|卫兵|管家|队长|长老|祭司|士兵|商人|旅人|猎人|老师|医生|警卫|护卫|roommate|guard|captain|merchant|teacher|doctor)$/iu;
+const ORGANIZATION_NAME = /商会|公会|协会|组织|势力|国家|王国|帝国|阵营|教会|教团|集团|家族|联盟|军团|公司/u;
+const ORGANIZATION_SECTION = /^(?:组织架构|组织|势力|国家|阵营|教会|公会|商会|家族|公司|军团|集团)(?:$|\s|[:：])/u;
+const PERSON_SECTION = /^(?:人物介绍|人物关系|个人档案|人物|角色|NPC)(?:$|\s|[:：])/iu;
+const GEOGRAPHIC_NAME = /(?:城|镇|村|街|室|房|塔|宫|营地|森林|山|河|湖|岛|学院|囚室|酒馆|城堡|门|港)$/u;
+function escapePattern(value) { return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+// 每个 key 独立取证；旧版显式追踪/确认的联系人保留人物资格。
+function classifyEntity({ name = '', comment = '', content = '', entityType, confirmed = false, tracked = false } = {}) {
+    if (entityType === 'organization') return { entityType: 'organization', confidence: 1, evidence: `已标记组织：${name}` };
+    if (entityType === 'person' || !entityType && (confirmed || tracked)) return { entityType: 'person', confidence: 1, evidence: `人物：${name}` };
+    const subject = escapePattern(name);
+    const organizationEvidence = String(content).split(/[。！？；\n]/u).find(sentence => name && new RegExp(`${subject}\\s*(?:是|为|属于一种|由)[^，。；]{0,16}(?:组织|势力|国家|商会|王国|教会|公会|协会|集团|联盟|军团|家族|公司)`, 'u').test(sentence));
+    if (ORGANIZATION_SECTION.test(comment) || (ORGANIZATION_NAME.test(name) && organizationEvidence)) return { entityType: 'organization', confidence: 0.98, evidence: organizationEvidence || comment || name };
+    if (ROLE_ONLY.test(name) || GEOGRAPHIC_NAME.test(name)) return { entityType: 'unknown', confidence: 0, evidence: '' };
+    const personEvidence = String(content).split(/[。！？；\n]/u).find(sentence => name && (
+        new RegExp(`${subject}\\s*(?:是(?:一[名个位])?[^，。；]{0,12}(?:人|医生|老师|骑士|守卫|商人|室友|舍友)|[，,:：]\\s*(?:他|她)|(?:的)?(?:妻子|丈夫|姐姐|哥哥|妹妹|弟弟))`, 'u').test(sentence)
+        || new RegExp(`(?:名叫|本名|又名|别名|姓名)\\s*[:：]?\\s*${subject}`, 'u').test(sentence)));
+    if (PERSON_SECTION.test(comment) || personEvidence) return { entityType: 'person', confidence: 0.9, evidence: personEvidence || comment };
+    return { entityType: 'unknown', confidence: 0, evidence: '' };
+}
+
+// 兼容旧调用点，人物资格以分类结果为准。
+function isPersonEntity(npc) { return classifyEntity(npc || {}).entityType === 'person'; }
+
+// 只按明确的“又名/本名/别名/就是”句式建立别名对，不猜测普通共现姓名。
+function strongAliasPairs(content, names = []) {
+    const text = String(content || '');
+    const candidates = [...new Set(names.map(cleanText).filter(Boolean))].filter(name => !ORGANIZATION_NAME.test(name) && !GEOGRAPHIC_NAME.test(name));
+    const pairs = [];
+    for (let i = 0; i < candidates.length; i++) for (let j = i + 1; j < candidates.length; j++) {
+        const a = candidates[i], b = candidates[j];
+        const link = (left, right) => `${escapePattern(left)}[，,：:\\s]*(?:(?:的)?(?:本名|原名|别名)(?:是|为|叫)?|又名|也叫|就是|是)[：:\\s]*[“「"']?${escapePattern(right)}(?![\\p{L}\\p{N}])`;
+        const evidence = text.split(/[。！？\n；]/u).find(sentence => new RegExp(`${link(a, b)}|${link(b, a)}`, 'u').test(sentence));
+        if (evidence) pairs.push({ names: [a, b], evidence, confidence: 1 });
+    }
+    return pairs;
+}
+
+// 仅比较已有独立状态是否在合并时冲突，不把任一状态静默盖到另一方。
+function meaningfulNpcValue(value) {
+    if (value === undefined || value === null || value === false || value === 0 || value === '' || value === 'unknown') return false;
+    if (Array.isArray(value)) return value.length > 0;
+    if (typeof value === 'object') return Object.values(value).some(meaningfulNpcValue);
+    return true;
+}
+
+// 合并冲突只统计明确填写的非占位字段，不把默认unknown模板误报为重要历史。
+function mergeConflict(states = {}) {
+    const [first, second] = Object.values(states);
+    if (!first || !second) return [];
+    return ['locationId','activity','status','scene','locked','activityLock','mobility','relationship','goals']
+        .filter(key => JSON.stringify(first[key]) !== JSON.stringify(second[key]) && (meaningfulNpcValue(first[key]) || meaningfulNpcValue(second[key])));
+}
+
 let applyingWorldProjection = false;
 const WORLD_PROMPT_KEY = 'npc_life_timeline';
 
@@ -170,8 +226,8 @@ function makeChat(id) {
 function makeNpc(name, source = 'card') {
     const clean = cleanText(name);
     return {
-        id: `npc:${idPart(clean)}`, name: clean, aliases: [], source,
-        description: '', tracked: true, confirmed: source === 'manual',
+        id: `npc:${idPart(clean)}`, name: clean, aliases: [], entityType: ['manual', 'legacy'].includes(source) ? 'person' : 'unknown', identityEvidence: '', source,
+        description: '', tracked: ['manual', 'legacy'].includes(source), confirmed: ['manual', 'legacy'].includes(source),
     };
 }
 
@@ -201,7 +257,14 @@ function normalizeWorld(world, worldKey) {
     world.chats ||= {};
     world.catalog ||= { npcs: [], locations: [], routes: [], scannedAt: 0 };
     world.catalog.npcs ||= [];
+    world.catalog.organizations ||= [];
+    world.catalog.identityCandidates ||= [];
+    world.catalog.identityMerges ||= [];
     world.catalog.locations ||= [];
+    for (const npc of world.catalog.npcs) {
+        npc.aliases = Array.isArray(npc.aliases) ? [...new Set(npc.aliases.map(cleanText).filter(Boolean))] : [];
+        if (!npc.entityType) npc.entityType = npc.confirmed || npc.tracked ? 'person' : 'unknown';
+    }
     world.catalog.routes ||= [];
     world.catalog.scannedAt ||= 0;
     for (const location of world.catalog.locations) {
@@ -225,6 +288,7 @@ function normalizeWorld(world, worldKey) {
         chat.player ||= { locationId: 'unknown', scene: 'unknown', locked: false };
         chat.stateRevision ||= 0;
         for (const npc of world.catalog.npcs) {
+            if (!isPersonEntity(npc) && !chat.npcStates[npc.id]) continue;
             const state = chat.npcStates[npc.id] ||= makeNpcState(npc.id);
             const oldLock = state.locked === true;
             state.mobility ||= oldLock ? 'immobile' : 'unknown';
@@ -254,7 +318,7 @@ function activeData() {
     if (!world.chats[cid]) world.chats[cid] = makeChat(cid);
     ensureCatalog(world);
     const chat = world.chats[cid];
-    for (const npc of world.catalog.npcs) if (!chat.npcStates[npc.id]) chat.npcStates[npc.id] = makeNpcState(npc.id);
+    for (const npc of world.catalog.npcs) if (isPersonEntity(npc) && !npc.mergedInto && !chat.npcStates[npc.id]) chat.npcStates[npc.id] = makeNpcState(npc.id);
     return { store, world, chat, wid, cid };
 }
 
@@ -309,64 +373,208 @@ function plausibleName(value) {
 
 // 从当前卡提取不依赖具体作品的 NPC 和地点候选，结果需要用户或模型确认。
 function discoverCatalog(card = currentCard()) {
-    const npcs = new Map();
-    const locations = new Map();
+    const npcs = new Map(), locations = new Map(), organizations = new Map(), identityCandidates = new Map();
     const book = card?.data?.character_book ?? card?.character_book;
-    const addNpc = (name, source = 'card') => {
-        const clean = plausibleName(name);
-        if (!clean) return;
-        const id = `npc:${idPart(clean)}`;
-        if (!npcs.has(id)) npcs.set(id, makeNpc(clean, source));
+    const addNpc = (name, aliases = [], evidence = '') => {
+        const clean = plausibleName(name); if (!clean) return;
+        const id = `npc:${idPart(clean)}`, prior = npcs.get(id), candidate = makeNpc(clean, 'card');
+        candidate.entityType = 'person'; candidate.tracked = false; candidate.confirmed = false;
+        candidate.aliases = [...new Set(aliases.map(cleanText).filter(value => value && value !== clean))];
+        candidate.identityEvidence = String(evidence || '').slice(0, 300);
+        if (prior) prior.aliases = [...new Set([...prior.aliases, ...candidate.aliases])]; else npcs.set(id, candidate);
     };
-    const addLocation = (name, source = 'card') => {
+    const addLocation = name => {
         const clean = plausibleName(name);
-        if (!clean) return;
+        if (!clean || ORGANIZATION_NAME.test(clean)) return;
         const id = `loc:${idPart(clean)}`;
-        if (!locations.has(id)) locations.set(id, makeLocation(clean, source, false));
+        if (!locations.has(id)) locations.set(id, makeLocation(clean, 'card', false));
     };
     for (const entry of Array.isArray(book?.entries) ? book.entries : []) {
-        const comment = cleanText(entry.comment || entry.name);
-        const locationLike = /地点|位置|区域|城市|城镇|村|街|室|房|塔|宫|营地|森林|山|河|湖|岛|学院|囚室|酒馆|城堡/u.test(comment);
-        const personLike = /人物|角色|个人档案|人物介绍|人物关系/u.test(comment);
-        if (locationLike) addLocation(comment.replace(/^(?:地点|位置|区域)\s*[:：]?\s*/u, ''));
-        if (personLike) for (const key of Array.isArray(entry.keys) ? entry.keys : []) addNpc(key);
-        if (!personLike) for (const key of Array.isArray(entry.keys) ? entry.keys : []) {
-            if (/(?:城|镇|村|街|室|房|塔|宫|营地|森林|山|河|湖|岛|学院|囚室|酒馆|城堡)$/u.test(String(key))) addLocation(key);
+        const comment = cleanText(entry.comment || entry.name), content = sanitizeEntry(entry.content);
+        const keys = [...new Set((Array.isArray(entry.keys) ? entry.keys : []).map(plausibleName).filter(Boolean))];
+        const explicitOrg = ORGANIZATION_SECTION.test(comment);
+        const classifications = new Map(keys.map(name => [name, classifyEntity({ name, comment, content })]));
+        const pairs = explicitOrg ? [] : strongAliasPairs(content, keys.filter(name => classifications.get(name).entityType !== 'organization'));
+        const groups = keys.map(name => new Set([name]));
+        for (const pair of pairs) {
+            const joined = groups.filter(group => pair.names.some(name => group.has(name)));
+            const union = new Set(joined.flatMap(group => [...group]));
+            groups.splice(0, groups.length, ...groups.filter(group => !joined.includes(group)), union);
         }
-        const text = sanitizeEntry(entry.content);
-        const matches = text.matchAll(/(?:地点|位于|前往|来到|驻扎于|居住在|区域|城市|城镇|村庄|森林|山谷|酒馆|城堡|学院)\s*[:：]?\s*([^\n，。；！？]{2,24})/gu);
-        for (const match of matches) addLocation(match[1]);
-        const namedLocations = text.matchAll(/([\p{L}\p{N}]{2,16}(?:城|镇|村|街|室|房|塔|宫|营地|森林|山|河|湖|岛|学院|囚室|酒馆|城堡))/gu);
-        for (const match of namedLocations) addLocation(match[1]);
+        for (const group of groups) {
+            const names = [...group], named = names.filter(name => !ROLE_ONLY.test(name));
+            const pair = pairs.find(item => item.names.some(name => group.has(name)));
+            if (pair && named.length) {
+                const primary = named.sort((a, b) => a.localeCompare(b, 'zh-CN'))[0];
+                addNpc(primary, names.filter(name => name !== primary), pair.evidence);
+                continue;
+            }
+            const name = names[0], classification = classifications.get(name);
+            if (classification.entityType === 'organization') {
+                const id = `org:${idPart(name)}`;
+                organizations.set(id, { id, name, entityType: 'organization', aliases: [], description: content.slice(0, 2000), identityEvidence: classification.evidence, source: 'card' });
+            } else if (classification.entityType === 'person') addNpc(name, [], classification.evidence);
+            else if (GEOGRAPHIC_NAME.test(name)) addLocation(name);
+            else {
+                const id = `identity:${idPart(name)}`;
+                identityCandidates.set(id, { id, name, entityType: 'unknown', aliases: [], identityEvidence: content.slice(0, 240), source: 'card' });
+            }
+        }
+        if (explicitOrg) continue;
+        if (/^(?:地点|位置|区域)\s*[:：]/u.test(comment)) addLocation(comment.replace(/^(?:地点|位置|区域)\s*[:：]?\s*/u, ''));
+        for (const match of content.matchAll(/(?:地点|位于|前往|来到|驻扎于|居住在|区域|城市|城镇|村庄|森林|山谷|酒馆|城堡|学院)\s*[:：]?\s*([^\n，。；！？]{2,24})/gu)) addLocation(match[1]);
+        for (const match of content.matchAll(/([\p{L}\p{N}]{2,16}(?:城|镇|村|街|室|房|塔|宫|营地|森林|山|河|湖|岛|学院|囚室|酒馆|城堡))/gu)) addLocation(match[1]);
     }
-    return { npcs: [...npcs.values()], locations: [...locations.values()] };
+    // 跨条目只认原文中逐字出现的强同人句式；已存在目录ID留待mergeCatalog保护历史。
+    const allNames = [...new Set([...npcs.values()].flatMap(npc => [npc.name, ...(npc.aliases || [])]))];
+    const sourceText = cardSource(card);
+    for (const pair of strongAliasPairs(sourceText, allNames)) {
+        const members = pair.names.map(name => [...npcs.values()].find(npc => npc.name === name || npc.aliases.includes(name))).filter(Boolean);
+        const uniqueMembers = [...new Map(members.map(npc => [npc.id, npc])).values()];
+        if (uniqueMembers.length === 1) {
+            const npc = uniqueMembers[0];
+            npc.aliases = [...new Set([...(npc.aliases || []), ...pair.names])].filter(name => name !== npc.name);
+            npc.identityEvidence = pair.evidence;
+        } else if (uniqueMembers.length === 0) {
+            const candidate = pair.names.map(name => npcs.get(`npc:${idPart(name)}`)).find(Boolean);
+            if (candidate) {
+                candidate.aliases = [...new Set([...(candidate.aliases || []), ...pair.names])].filter(name => name !== candidate.name);
+                candidate.identityEvidence = pair.evidence;
+            }
+        } else if (uniqueMembers.length === 2) {
+            const [first, second] = uniqueMembers;
+            const canonical = first.name.localeCompare(second.name, 'zh-CN') <= 0 ? first : second;
+            const duplicate = canonical === first ? second : first;
+            canonical.aliases = [...new Set([...(canonical.aliases || []), duplicate.name, ...(duplicate.aliases || []), ...pair.names])].filter(name => name !== canonical.name);
+            canonical.identityEvidence = pair.evidence;
+            npcs.delete(duplicate.id);
+        }
+    }
+    return {npcs:[...npcs.values()],locations:[...locations.values()],organizations:[...organizations.values()],identityCandidates:[...identityCandidates.values()]};
+}
+
+// 在当前卡资料中寻找跨条目的明确同一人句式，不依赖角色卡名字相似度。
+function findAliasEvidence(card, first, second) {
+    const book = card?.data?.character_book ?? card?.character_book;
+    for (const entry of Array.isArray(book?.entries) ? book.entries : []) {
+        if (ORGANIZATION_SECTION.test(cleanText(entry.comment || entry.name))) continue;
+        const text = sanitizeEntry(entry.content);
+        const evidence = strongAliasPairs(text, [first, second])[0]?.evidence;
+        if (evidence) return evidence;
+    }
+    return '';
+}
+
+// 判断同一来源条目正文是否同时包含两个人名及明确同人关系词。
+function contentContainsAlias(card, first, second) { return Boolean(findAliasEvidence(card, first, second)); }
+
+// 强别名必须来自同一条目的 keys 和正文。
+function verifiedIdentityAliases(card, name, aliases, evidence) {
+    return aliases.filter(alias => {
+        const original = findAliasEvidence(card, name, alias);
+        return original && strongAliasPairs(evidence, [name, alias]).length > 0;
+    });
 }
 
 // 合并扫描结果与用户已经确认的目录，避免世界书小改动抹掉手工校准。
 function mergeCatalog(world, discovered) {
-    const oldNpcs = new Map(world.catalog.npcs.map(item => [item.id, item]));
+    world.catalog.organizations ||= []; world.catalog.identityCandidates ||= []; world.catalog.identityMerges ||= [];
     const oldLocations = new Map(world.catalog.locations.map(item => [item.id, item]));
-    for (const candidate of discovered.npcs) {
-        const old = oldNpcs.get(candidate.id);
-        if (old) Object.assign(candidate, old, { name: old.name || candidate.name });
+    const keepNpcs = [...world.catalog.npcs];
+    const review = candidate => {
+        const id = candidate.id.startsWith('merge:') ? candidate.id : `identity:${idPart(candidate.name)}`;
+        world.catalog.identityCandidates = [...world.catalog.identityCandidates.filter(item => item.id !== id), { ...candidate, id, entityType: 'unknown', requiresReview: true }];
+    };
+    for (const candidate of discovered.npcs || []) {
+        if (!isPersonEntity(candidate)) {
+            if (candidate.entityType === 'organization') {
+                const id = `org:${idPart(candidate.name)}`;
+                if (!world.catalog.organizations.some(item => item.id === id)) world.catalog.organizations.push({ ...candidate, id });
+            } else review(candidate);
+            continue;
+        }
+        const names = [candidate.name, ...(candidate.aliases || [])];
+        const matches = keepNpcs.filter(old => old.id === candidate.id || [old.name, ...(old.aliases || [])].some(name => names.some(value => value.toLowerCase() === name.toLowerCase())));
+        const uniqueMatches = [...new Map(matches.map(item => [item.id, item])).values()];
+        const old = uniqueMatches.find(item => item.id === candidate.id) || (uniqueMatches.length === 1 ? uniqueMatches[0] : null);
+        if (uniqueMatches.length > 1) {
+            // 已有的两个稳定 ID 永不因重扫自动合并或互加别名。
+            review({ ...candidate, id: `merge:${uniqueMatches.map(item => item.id).sort().join(':')}`, sourceNpcIds: uniqueMatches.map(item=>item.id), targetNpcIds: uniqueMatches.map(item=>item.id) });
+            continue;
+        }
+        if (old) {
+            const aliases = [...new Set([...(old.aliases || []), ...names])].filter(name => name !== old.name);
+            old.aliases = aliases;
+            old.identityEvidence ||= candidate.identityEvidence;
+            old.entityType = 'person';
+            continue;
+        }
+        keepNpcs.push(candidate);
     }
     for (const candidate of discovered.locations) {
         const old = oldLocations.get(candidate.id);
-        if (old) Object.assign(candidate, old, { name: old.name || candidate.name });
+        if (old) Object.assign(candidate, old, { name: old.name || candidate.name,
+            aliases: [...new Set([...(candidate.aliases || []), ...(old.aliases || [])])] });
     }
     // 软删除标记留在目录里作为墓碑，扫描不得复活；未再次发现的已确认数据同样保留。
-    const keepNpcs = [...discovered.npcs].filter(candidate => !world.catalog.npcs.some(old =>
-        (old.archived || old.ignored) && old.id !== candidate.id &&
-        [old.name, ...(old.aliases || [])].some(name => name.toLowerCase() === candidate.name.toLowerCase())));
     const keepLocations = [...discovered.locations];
-    for (const old of world.catalog.npcs) if (!keepNpcs.some(item => item.id === old.id)) keepNpcs.push(old);
     for (const old of world.catalog.locations) if (!keepLocations.some(item => item.id === old.id)) keepLocations.push(old);
     world.catalog.npcs = keepNpcs;
+    world.catalog.organizations = [...new Map([...world.catalog.organizations,...(discovered.organizations||[])].map(item=>[item.id,{...world.catalog.organizations.find(old=>old.id===item.id),...item}])).values()];
+    world.catalog.identityCandidates = [...new Map([...world.catalog.identityCandidates,...(discovered.identityCandidates||[])].map(item=>[item.id,{...world.catalog.identityCandidates.find(old=>old.id===item.id),...item}])).values()];
     world.catalog.locations = keepLocations;
 }
 
 // 判断角色是否处于启用目录，归档和忽略角色仅保留历史。
-function activeNpc(npc) { return !!npc && !npc.archived && !npc.ignored; }
+function activeNpc(npc) { return !!npc && isPersonEntity(npc) && !npc.archived && !npc.ignored && !npc.mergedInto; }
+
+// 将唯一候选显式分类，不把 unknown 或 organization 建立为人物动态。
+function classifyNpc(id, entityType) {
+    const {world}=activeData();
+    if(!['person','organization','unknown'].includes(entityType)) throw new Error('无效身份分类。');
+    const npc=world.catalog.npcs.find(item=>item.id===id);
+    const candidate=world.catalog.identityCandidates.find(item=>item.id===id);
+    const organization=world.catalog.organizations.find(item=>item.id===id);
+    const source=npc||candidate||organization; if(!source) throw new Error('找不到身份候选。');
+    if(entityType==='organization') {
+        const record={id:`org:${idPart(source.name)}`,name:source.name,entityType:'organization',description:source.description||'',identityEvidence:source.identityEvidence||'',source:'manual'};
+        world.catalog.organizations=[...world.catalog.organizations.filter(item=>item.id!==record.id),record];
+        if(npc){npc.entityType='organization';npc.tracked=false;npc.confirmed=false;}
+        world.catalog.identityCandidates = world.catalog.identityCandidates.filter(item=>item.id!==id);
+    } else if(entityType==='person') {
+        const existing=world.catalog.npcs.find(item=>item.id===`npc:${idPart(source.name)}`);
+        const person=existing||makeNpc(source.name,'manual');
+        person.entityType='person';person.identityEvidence=source.identityEvidence||person.identityEvidence||'';person.tracked=true;person.confirmed=true;
+        person.aliases = [...new Set([...(person.aliases || []), ...(source.aliases || [])])].filter(alias => alias && alias !== person.name);
+        if(!existing)world.catalog.npcs.push(person);
+        if (source.entityType === 'organization') world.catalog.organizations = world.catalog.organizations.map(item => item.id === id ? { ...item, reclassifiedAsNpcId: person.id } : item);
+        world.catalog.identityCandidates = world.catalog.identityCandidates.filter(item=>item.id!==id);
+    } else if(npc){
+        npc.entityType='unknown';npc.tracked=false;npc.confirmed=false;
+        world.catalog.identityCandidates=[...world.catalog.identityCandidates.filter(item=>item.id!==id),{...source,entityType:'unknown'}];
+    } else {
+        world.catalog.identityCandidates=[...world.catalog.identityCandidates.filter(item=>item.id!==id),{...source,entityType:'unknown'}];
+    }
+    if(entityType!=='unknown')world.catalog.identityCandidates=world.catalog.identityCandidates.filter(item=>item.id!==id);
+    save();render();
+}
+
+// 只合并玩家明确选定的两个 canonical 人物，旧消息/状态引用保留，冲突进入复核。
+function mergeNpcIdentity(fromId,toId,evidence='用户显式确认') {
+    const {world}=activeData(),source=world.catalog.npcs.find(item=>item.id===fromId),target=world.catalog.npcs.find(item=>item.id===toId);
+    if(!activeNpc(source)||!activeNpc(target)||fromId===toId)throw new Error('请选择两个不同的活跃人物。');
+    const sourceTypeBefore=source.entityType, sourceTrackedBefore=source.tracked, sourceConfirmedBefore=source.confirmed;
+    const conflicts=[];
+    for(const chat of Object.values(world.chats)){const fields=mergeConflict({from:chat.npcStates[fromId]||{},to:chat.npcStates[toId]||{}});if(fields.length){conflicts.push({chatId:chat.id,fields});chat.entityMergeReviews ||= [];chat.entityMergeReviews.push({fromId,toId,fields,status:'review'});if(chat.timeline)chat.timeline.pausedReason='人物合并存在不同状态，请核对后重建同步世界基线。';chat.stateRevision=(chat.stateRevision||0)+1;}}
+    const introducedAliases = [...new Set([source.name, ...(source.aliases || [])])].filter(name => name && name !== target.name && !(target.aliases || []).includes(name));
+    target.aliases=[...new Set([...(target.aliases||[]),...introducedAliases])].filter(name=>name!==target.name);
+    source.mergedInto=toId;source.tracked=false;source.confirmed=false;
+    const record={id:newId(),fromId,toId,fromName:source.name,toName:target.name,evidence:String(evidence).slice(0,300),introducedAliases,sourceType:sourceTypeBefore,sourceTrackedBefore:sourceTrackedBefore,sourceConfirmedBefore:sourceConfirmedBefore,conflicts,status:'active',createdAt:Date.now()};
+    world.catalog.identityMerges.push(record);save();setPrompt('');syncWorldPrompt();render();return record;
+}
+
+// 撤销只恢复身份目录资格，不删除合并期间产生的历史内容。
+function undoNpcMerge(mergeId) { const {world}=activeData(),record=world.catalog.identityMerges.find(item=>item.id===mergeId&&item.status==='active');if(!record)throw new Error('找不到可撤销的身份合并。');const source=world.catalog.npcs.find(item=>item.id===record.fromId),target=world.catalog.npcs.find(item=>item.id===record.toId);if(source){delete source.mergedInto;source.entityType=record.sourceType||'person';source.confirmed=record.sourceConfirmedBefore===true;source.tracked=record.sourceTrackedBefore===true;}if(target&&Array.isArray(record.introducedAliases))target.aliases=(target.aliases||[]).filter(alias=>!record.introducedAliases.includes(alias));record.status='undone';record.undoneAt=Date.now();for(const chat of Object.values(world.chats))if(chat.timeline&&record.conflicts.length)chat.timeline.pausedReason='身份合并已撤销；相关历史保留，请核对后重建同步世界基线。';save();render();return true;}
 
 // 软删除或永久忽略当前世界角色，保留历史并暂停涉及该角色的完整行程组。
 function archiveNpc(id, ignored = false) {
@@ -429,7 +637,7 @@ function parseJsonResponse(raw) {
 async function rawGenerate(systemPrompt, prompt, schema = null, task = 'analysis') {
     if (!consoleFeatures) throw new Error('控制台生成服务尚未初始化。');
     const shape = schema ? `\n【JSON 字段结构说明（只作文本，不是 API 参数）】\n${JSON.stringify(schema)}` : '';
-    const keywords = activeData().world.catalog.npcs.map(npc => npc.name).filter(name => prompt.includes(name));
+    const keywords = activeData().world.catalog.npcs.filter(activeNpc).map(npc => npc.name).filter(name => prompt.includes(name));
     return consoleFeatures.request(systemPrompt, prompt + shape, task,
         { memoryText: consoleFeatures.relevant(keywords) });
 }
@@ -441,8 +649,9 @@ async function refineCatalogWithModel() {
     if (!source) throw new Error('当前角色卡没有可读取的设定文本。');
     const schema = { type: 'object', properties: {
         npcs: { type: 'array', items: { type: 'object', properties: {
-            name: { type: 'string' }, aliases: { type: 'array', items: { type: 'string' } }, description: { type: 'string' },
-        }, required: ['name'] } },
+            name: { type: 'string' }, entityType: { type: 'string', enum: ['person','organization','unknown'] }, aliases: { type: 'array', items: { type: 'string' } }, identityEvidence: { type: 'string' }, description: { type: 'string' },
+        }, required: ['name','entityType'] } },
+        organizations: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, description: { type: 'string' } }, required: ['name'] } },
         locations: { type: 'array', items: { type: 'object', properties: {
             name: { type: 'string' }, aliases: { type: 'array', items: { type: 'string' } },
         }, required: ['name'] } },
@@ -459,12 +668,44 @@ async function refineCatalogWithModel() {
             const name = plausibleName(item?.name);
             if (!name || !sourceText.includes(name.toLowerCase())) continue;
             const target = type === 'npc' ? world.catalog.npcs : world.catalog.locations;
-            const id = type === 'npc' ? `npc:${idPart(name)}` : `loc:${idPart(name)}`;
-            if (type === 'npc' && target.some(entry => !activeNpc(entry) &&
-                [entry.id, entry.name, ...(entry.aliases || [])].some(value => value.toLowerCase() === name.toLowerCase() || value === id))) continue;
-            const found = target.find(entry => entry.id === id) || (type === 'npc' ? makeNpc(name, 'model') : makeLocation(name, 'model', false));
+            if (type === 'npc') {
+                const evidence = cleanText(item.identityEvidence);
+                const aliases = Array.isArray(item.aliases) ? item.aliases.map(cleanText).filter(Boolean) : [];
+                const hasStrongIdentity = evidence && (sourceText.includes(evidence.toLowerCase()) || strongAliasPairs(source, [name, ...aliases]).length > 0);
+                const classification = classifyEntity({ name, entityType: item.entityType, aliases, content: source, identityEvidence: evidence });
+                if (classification.entityType === 'organization') {
+                    const organization = { id:`org:${idPart(name)}`, name, entityType:'organization', aliases, description:cleanText(item.description || ''), identityEvidence:evidence, source:'model' };
+                    world.catalog.organizations = [...world.catalog.organizations.filter(old=>old.id!==organization.id),organization];
+                    continue;
+                }
+                if (classification.entityType !== 'person' || !hasStrongIdentity) {
+                    const id=`identity:${idPart(name)}`;
+                    world.catalog.identityCandidates = [...world.catalog.identityCandidates.filter(old=>old.id!==id), { id, name, entityType:'unknown', aliases, identityEvidence:evidence || name, source:'model' }];
+                    continue;
+                }
+                const pair = strongAliasPairs(source, [name, ...aliases]).find(item=>item.names.includes(name) && aliases.some(alias=>item.names.includes(alias)));
+                const canonicalName = pair ? pair.names.slice().sort((a,b)=>a.localeCompare(b,'zh-CN'))[0] : name;
+                const identityAliases = [...new Set([...(pair?.names || []), ...aliases])].filter(alias=>alias && alias!==canonicalName);
+                const matched = world.catalog.npcs.find(npc=>activeNpc(npc) && npc.name===canonicalName);
+                // 不重写已有NPC的稳定ID；有唯一文本别名证据时只附加别名，否则只进入待审核队列。
+                if (matched && identityAliases.length && item.identityEvidence && sourceText.includes(item.identityEvidence.toLowerCase())) {
+                    matched.aliases = [...new Set([...(matched.aliases||[]), ...identityAliases])];
+                    matched.identityEvidence = cleanText(item.identityEvidence).slice(0,300);
+                    if (item.description) matched.description ||= cleanText(item.description);
+                } else if (matched && identityAliases.length) {
+                    const id=`identity:${idPart(name)}`;
+                    world.catalog.identityCandidates=[...world.catalog.identityCandidates.filter(old=>old.id!==id),{id,name,entityType:'unknown',aliases:identityAliases,identityEvidence:evidence||name,source:'model'}];
+                } else {
+                    const id=`npc:${idPart(name)}`, candidate=target.find(old=>old.id===id) || makeNpc(name,'model');
+                    candidate.entityType='person'; candidate.identityEvidence=evidence; candidate.aliases=[...new Set([...(candidate.aliases||[]),...identityAliases])];
+                    if (item.description) candidate.description=cleanText(item.description);
+                    if (!target.includes(candidate)) target.push(candidate);
+                }
+                continue;
+            }
+            const id = `loc:${idPart(name)}`;
+            const found = target.find(entry => entry.id === id) || makeLocation(name, 'model', false);
             found.aliases = [...new Set([...(found.aliases || []), ...(Array.isArray(item.aliases) ? item.aliases.map(cleanText) : [])])].filter(Boolean);
-            if (type === 'npc' && item.description) found.description = cleanText(item.description);
             if (!target.includes(found)) target.push(found);
         }
     };
@@ -1568,7 +1809,7 @@ function setManualNpcLocation(npcId, value) {
 function renderRoster() {
     const { world, chat } = activeData();
     const list = $(`${ROOT} [data-roster]`).empty();
-    if (!world.catalog.npcs.length) list.text('当前卡还没有发现 NPC 候选。可以点击 AI 整理或手动添加。');
+    if (!world.catalog.npcs.some(activeNpc)) list.text('当前卡还没有已识别人物。组织和歧义称呼不会创建人物状态；可用身份管理确认候选。');
     for (const npc of world.catalog.npcs.filter(activeNpc)) {
         const state = chat.npcStates[npc.id] || makeNpcState(npc.id);
         const row = $('<div class="npc-life-entity"></div>').attr('data-npc-id', npc.id);
@@ -1589,6 +1830,17 @@ function renderRoster() {
         row.append($('<span class="npc-life-muted"></span>').text(`｜${state.activity || '未知'}｜${state.scene || '未知'}｜位置来源 ${state.source || '未知'}`));
         list.append(row);
     }
+    const candidates = $(`${ROOT} [data-identity-candidates]`).empty();
+    for (const item of world.catalog.identityCandidates || []) {
+        const row = $('<div class="npc-life-fact"></div>').attr('data-identity-id', item.id).append($('<b></b>').text(item.name || '未知称呼'));
+        row.append($('<small></small>').text(item.identityEvidence || '没有找到明确人物证据。'));
+        row.append($('<button type="button" class="menu_button" data-identity-person>确认为人物</button>'), $('<button type="button" class="menu_button" data-identity-organization>标为组织</button>'));
+        candidates.append(row);
+    }
+    if (!candidates.children().length) candidates.text('暂无待确认身份称呼。');
+    const organizations = $(`${ROOT} [data-organization-catalog]`).empty();
+    for (const item of world.catalog.organizations || []) organizations.append($('<div class="npc-life-event"></div>').text(`${item.name}｜资料组织，不参与人物行动`));
+    if (!organizations.children().length) organizations.text('暂无组织资料。');
 }
 
 // 绘制可编辑地点白名单。
@@ -1770,7 +2022,7 @@ function renderControls() {
 // 刷新面板而不重建事件绑定。
 function render() {
     const { world, chat } = activeData();
-    $(`${ROOT} [data-world]`).text(`${world.label || world.id}｜${chatId()}｜目录 ${world.catalog.npcs.length} NPC / ${world.catalog.locations.length} 地点`);
+    $(`${ROOT} [data-world]`).text(`${world.label || world.id}｜${chatId()}｜目录 ${world.catalog.npcs.filter(activeNpc).length} 人物 / ${(world.catalog.organizations || []).length} 组织 / ${world.catalog.locations.length} 地点`);
     $(`${ROOT} [data-day]`).val(chat.day);
     $(`${ROOT} [data-player-location]`).val(locationName(world, chat.player.locationId) === '未知地点' ? '' : locationName(world, chat.player.locationId));
     $(`${ROOT} [data-generate]`).prop('disabled', busy);
@@ -1973,7 +2225,14 @@ function openConnectionManager() {
 // 装载手机式自由窗口并将原工作台整体搬入动态页，保留原事件委托。
 function attachConsole() {
     consoleView = mountConsole({
-        snapshot: () => consoleFeatures.snapshot(),
+        snapshot: () => {
+            const base = consoleFeatures.snapshot(), { world } = activeData();
+            return { ...base, npcs: world.catalog.npcs.filter(activeNpc).map(npc => {
+                const view = base.npcs.find(item => item.id === npc.id);
+                return view ? { ...view, name: npc.name, aliases: npc.aliases || [], entityType: npc.entityType || 'person' } : null;
+            }).filter(Boolean), organizations: world.catalog.organizations || [],
+                identityCandidates: world.catalog.identityCandidates || [], identityMerges: world.catalog.identityMerges || [] };
+        },
         generateDiary: (...args) => consoleFeatures.generateDiary(...args),
         sendChat: (...args) => consoleFeatures.sendChat(...args),
         clearChat: (...args) => consoleFeatures.clearChat(...args),
@@ -1994,6 +2253,7 @@ function attachConsole() {
         refreshMemory: () => consoleFeatures.memory(),
         testSecondaryProfile: id => consoleFeatures.testSecondaryProfile(id),
         archiveNpc, restoreNpc,
+        classifyEntity: (id,type) => classifyNpc(id,type), mergeEntities: (from,to) => mergeNpcIdentity(from,to), undoEntityMerge: id => undoNpcMerge(id),
         openConnectionManager,
         getWorkbench: () => document.querySelector(ROOT),
         openWorkbench: () => consoleView?.open('dynamic'),
@@ -2036,7 +2296,7 @@ function addUI() {
       <div data-requests></div>
     </div>
     <div class="npc-life-section"><b>旅行计划</b><div data-travels></div></div>
-    <div class="npc-life-section"><b>NPC 名册与动态状态</b><div data-roster></div><button type="button" class="menu_button" data-add-npc>手动添加 NPC</button></div>
+    <div class="npc-life-section"><b>NPC 名册与动态状态</b><div data-roster></div><button type="button" class="menu_button" data-add-npc>手动添加人物</button><div data-identity-candidates></div><div data-organization-catalog></div></div>
     <div class="npc-life-section"><b>地点白名单</b><div data-locations></div><button type="button" class="menu_button" data-add-location>手动添加地点</button></div>
     <details><summary>待审核正文事实</summary><div data-facts></div></details>
     <details><summary>同行组与生活事件</summary><div data-events></div></details>
@@ -2086,6 +2346,8 @@ function addUI() {
     root.on('change.npcLife', '[data-location-confirm]', guarded(function () { const row = $(this).closest('[data-location-id]'); const { world } = activeData(); const location = world.catalog.locations.find(item => item.id === row.attr('data-location-id')); if (location) { location.confirmed = this.checked; save(); render(); } }));
     root.on('click.npcLife', '[data-add-route]', guarded(function () { const row = $(this).closest('[data-location-id]'); const { world } = activeData(); const from = world.catalog.locations.find(item => item.id === row.attr('data-location-id')); const target = confirmedLocation(world, row.find('[data-route-target]').val()); const durationDays = Number(row.find('[data-route-days]').val()); if (!from?.confirmed || !target || from.id === target.id) throw new Error('路线两端必须是不同的已确认地点。'); if (!Number.isInteger(durationDays) || durationDays < 1 || durationDays > 3650) throw new Error('旅行天数需为 1 到 3650 的整数。'); world.catalog.routes ||= []; world.catalog.routes = world.catalog.routes.filter(route => !(route.fromId === from.id && route.toId === target.id)); world.catalog.routes.push({ id: newId(), fromId: from.id, toId: target.id, durationDays, confirmed: true, mode: 'manual', source: 'manual' }); save(); render(); }));
     root.on('click.npcLife', '[data-add-npc]', guarded(() => { const name = window.prompt('输入当前角色卡里的 NPC 名字：'); if (!name) return; const { world, chat } = activeData(); const npc = makeNpc(name, 'manual'); npc.tracked = true; if (!world.catalog.npcs.some(item => item.id === npc.id)) world.catalog.npcs.push(npc); chat.npcStates[npc.id] ||= makeNpcState(npc.id); save(); render(); }));
+    root.on('click.npcLife', '[data-identity-person]', guarded(function () { classifyNpc($(this).closest('[data-identity-id]').attr('data-identity-id'), 'person'); }));
+    root.on('click.npcLife', '[data-identity-organization]', guarded(function () { classifyNpc($(this).closest('[data-identity-id]').attr('data-identity-id'), 'organization'); }));
     root.on('click.npcLife', '[data-add-location]', guarded(() => { const name = window.prompt('输入地点名称（手动确认后才参与移动/相遇）：'); if (!name) return; const { world } = activeData(); const location = makeLocation(name, 'manual', true); if (!world.catalog.locations.some(item => item.id === location.id)) world.catalog.locations.push(location); save(); render(); }));
 }
 

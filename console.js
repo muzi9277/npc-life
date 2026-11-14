@@ -24,7 +24,7 @@ export function mountConsole(adapter) {
     let drafts = Object.create(null), generalDrafts = Object.create(null), renderedIdentity = state.identity, renderedTab = '', renderedNpc = '', identityEpoch = 0;
     let priorFocus = null, sizeObserver = null, modalFocus = null, modalKind = '', modalProfileId = '', modalEpoch = 0, modalBusy = false;
     const cleanups = [], root = $('<section id="npc-life-console" class="nlc" hidden aria-label="NPC Life 控制台" tabindex="-1"></section>');
-    root.html(`<header class="nlc-bar" data-drag><strong>NPC Life</strong><span class="nlc-version">3.0.0-beta.4</span><span class="nlc-world"></span><span class="nlc-controls"><button type="button" class="menu_button" data-smaller aria-label="缩小窗口" title="缩小">−</button><button type="button" class="menu_button" data-larger aria-label="放大窗口" title="放大">＋</button><button type="button" class="menu_button" data-min aria-label="最小化窗口" title="最小化">⌄</button><button type="button" class="menu_button" data-max aria-label="最大化或恢复窗口" title="最大化/恢复">□</button><button type="button" class="menu_button" data-close aria-label="关闭窗口" title="关闭">×</button></span></header><nav class="nlc-tabs" role="tablist" aria-label="控制台页面"></nav><div class="nlc-status" role="status" aria-live="polite"></div><main class="nlc-pages" role="tabpanel"></main>`);
+    root.html(`<header class="nlc-bar" data-drag><strong>NPC Life</strong><span class="nlc-version">3.0.0-beta.5</span><span class="nlc-world"></span><span class="nlc-controls"><button type="button" class="menu_button" data-smaller aria-label="缩小窗口" title="缩小">−</button><button type="button" class="menu_button" data-larger aria-label="放大窗口" title="放大">＋</button><button type="button" class="menu_button" data-min aria-label="最小化窗口" title="最小化">⌄</button><button type="button" class="menu_button" data-max aria-label="最大化或恢复窗口" title="最大化/恢复">□</button><button type="button" class="menu_button" data-close aria-label="关闭窗口" title="关闭">×</button></span></header><nav class="nlc-tabs" role="tablist" aria-label="控制台页面"></nav><div class="nlc-status" role="status" aria-live="polite"></div><main class="nlc-pages" role="tabpanel"></main>`);
     $('body').append(root);
     const channelDialog = $(`<div class="nlc-channel-overlay" hidden><section class="nlc-channel-dialog" role="dialog" aria-modal="true" aria-labelledby="nlc-channel-title" tabindex="-1"><header><b id="nlc-channel-title"></b><button type="button" class="menu_button" data-channel-close aria-label="关闭对话框">×</button></header><div class="nlc-channel-body"></div></section></div>`);
     $('body').append(channelDialog);
@@ -39,6 +39,10 @@ export function mountConsole(adapter) {
     function card(title) { return $('<section class="nlc-card">').append($('<h3>').text(title)); }
     // 用紧凑文字显示空态。
     function empty(text) { return $('<p class="nlc-empty">').text(text); }
+    // 联系人列表只消费服务端已经归一化的 canonical person；组织与 unknown 留在身份管理。
+    function canonicalPersons(snapshot = state) { return snapshot.npcs || []; }
+    function aliasesText(n) { return Array.isArray(n?.aliases) ? n.aliases.filter(Boolean).join('、') : String(n?.aliases || ''); }
+    function identityEvidenceText(value) { return typeof value === 'string' ? value : value == null ? '' : JSON.stringify(value); }
     // 保存可见窗口几何，避免隐藏或最小化尺寸污染正常尺寸。
     function persist() {
         if (root.prop('hidden')) return;
@@ -174,7 +178,9 @@ export function mountConsole(adapter) {
     // 创建动态总览并只移动旧工作台节点以保留监听器。
     function overview() {
         const page = $('<div class="nlc-page">'), cards = $('<div class="nlc-grid">');
-        (state.npcs || []).filter(n => n.confirmed || n.tracked).forEach(n => cards.append($('<article class="nlc-item">').append($('<h3>').text(n.name || '未命名 NPC'), $('<p>').text(`${n.locationName || '地点未知'} · ${n.activity || n.status || '暂无活动'}`), n.scene ? $('<p class="nlc-muted">').text(n.scene) : '', button('查看联系人', 'select-npc', { 'data-npc': n.id }))));
+        canonicalPersons().filter(n => n.confirmed || n.tracked).forEach(n => cards.append($('<article class="nlc-item">').append($('<h3>').text(n.name || '未命名 NPC'), $('<p>').text(`${n.locationName || '地点未知'} · ${n.activity || n.status || '暂无活动'}`), aliasesText(n) ? $('<p class="nlc-muted">').text(`称呼：${aliasesText(n)}`) : '', n.scene ? $('<p class="nlc-muted">').text(n.scene) : '', button('查看联系人', 'select-npc', { 'data-npc': n.id }))));
+        const candidateCount = (state.identityCandidates || []).length;
+        if (candidateCount) cards.append($('<p class="nlc-muted nlc-identity-summary" data-identity-summary>').text(`身份管理：${candidateCount} 条候选待确认，可在档案页处理。`));
         if (!cards.children().length) cards.append(empty('暂无联系人动态。可在高级世界工作台中确认角色与地点。'));
         const workbench = $('<details class="nlc-workbench"><summary>高级世界工作台</summary><div class="nlc-workbench-body"></div></details>');
         try { const panel = oldPanel || adapter.getWorkbench?.(); if (panel?.nodeType) { if (!oldPanel) { oldPanel = panel; oldPanelParent = panel.parentNode; oldPanelNext = panel.nextSibling; } workbench.find('.nlc-workbench-body').append(panel); } }
@@ -184,12 +190,13 @@ export function mountConsole(adapter) {
     // 创建联系人资料、日记和独立后台试聊分组。
     function contacts() {
         const page = $('<div class="nlc-page nlc-contact">'), roster = $('<aside class="nlc-roster" aria-label="联系人列表">'), detail = $('<section class="nlc-detail">');
-        (state.npcs || []).forEach(n => roster.append(button(n.name || '未命名', 'select-npc', { 'data-npc': n.id, 'aria-pressed': String(n.id === npcId), title: n.name || '未命名' }).toggleClass('is-active', n.id === npcId)));
-        const npc = (state.npcs || []).find(n => n.id === npcId);
-        if (!npc) detail.append(empty((state.npcs || []).length ? '选择联系人查看详情、日记与试聊。' : '暂无活跃联系人。已归档联系人可在档案页恢复。'));
+        canonicalPersons().forEach(n => roster.append(button(n.name || '未命名', 'select-npc', { 'data-npc': n.id, 'aria-pressed': String(n.id === npcId), title: n.name || '未命名' }).toggleClass('is-active', n.id === npcId)));
+        const npc = canonicalPersons().find(n => n.id === npcId);
+        if (!npc) detail.append(empty(canonicalPersons().length ? '选择联系人查看详情、日记与试聊。' : '暂无活跃联系人。已归档联系人可在档案页恢复。'));
         else {
             const info = card(npc.name || '未命名 NPC').append($('<p>').text([npc.locationName, npc.activity || npc.status, npc.relationship].filter(Boolean).join(' · ') || '暂无动态信息'));
-            info.append($('<div class="nlc-row">').append(button('删除联系人', 'archive-npc'), button('永久忽略', 'ignore-npc')), $('<p class="nlc-muted">').text('删除或忽略后仍保留历史，可在档案页恢复。'));
+            if (aliasesText(npc)) info.append($('<p class="nlc-muted">').text(`其他称呼：${aliasesText(npc)}`));
+            info.append($('<div class="nlc-row">').append(button('删除联系人', 'archive-npc'), button('永久忽略', 'ignore-npc'), button('合并到…', 'open-entity-merge', { 'data-entity-id': npc.id }).prop('disabled', typeof adapter.mergeEntities !== 'function'), button('标记组织…', 'classify-organization', { 'data-entity-id': npc.id }).prop('disabled', typeof adapter.classifyEntity !== 'function')), $('<p class="nlc-muted">').text('删除或忽略后仍保留历史，可在档案页恢复。合并后只显示一个活跃联系人；历史仍保留原始人物ID，状态冲突需人工核对，不会自动搬迁所有记录。'));
             const diaryCard = card('日记'), charsValue = Number(state.preferences?.diaryChars || 800);
             const chars = $('<select class="text_pole" data-field="diary-chars"><option value="50">50 字</option><option value="200">200 字</option><option value="800">800 字</option><option value="1600">1600 字</option><option value="custom">自定义</option></select>').val([50,200,800,1600].includes(charsValue) ? String(charsValue) : 'custom');
             diaryCard.append($('<div class="nlc-form-grid">').append(field('日期', 'diary-day', state.day || 1, 'number').find('input').attr({ min:1, max:1000000 }).end(), $('<label class="nlc-field">').append($('<span>').text('篇幅'), chars), field('自定义字数', 'diary-custom', charsValue, 'number').attr('data-custom-chars', '').find('input').attr({ min:1, max:10000 }).end()), $('<div class="nlc-row">').append(button('生成日记', 'diary'), button('取消草稿', 'cancel-contact')));
@@ -223,6 +230,38 @@ export function mountConsole(adapter) {
         const imports = card('地图导入').append($('<div class="nlc-row">').append($('<label class="menu_button nlc-upload">上传地图<input type="file" data-map-file accept="image/png,image/jpeg,image/webp" hidden></label>'), $('<label class="menu_button nlc-upload">导入 JSON 文件<input type="file" data-import-file accept=".json,application/json" hidden></label>')), $('<label class="nlc-field">').append($('<span>').text('JSON 地图数据'), $('<textarea class="text_pole" data-field="map-json" rows="3" placeholder="粘贴 JSON 地图数据"></textarea>')), $('<div class="nlc-row">').append(button('导入粘贴内容', 'import-map'), button('取消草稿', 'cancel-map')));
         page.append($('<label class="nlc-field">').append($('<span>').text('地点标签筛选'), filter), hasImage || area.children().length ? area : empty('暂无底图或有坐标的地点，可上传地图或导入地点坐标。'), tagRows.children().length ? tagRows : empty('暂无符合筛选的已确认地点。'), imports); pages.append(page);
     }
+    // 折叠身份管理只呈现组织资料、待确认身份与可撤销合并记录。
+    function identityManagement() {
+        const organizations = state.organizations || [], candidates = state.identityCandidates || [], merges = state.identityMerges || [];
+        const details = $('<details class="nlc-identity-management nlc-card" data-draft-details="identity-management"><summary>资料与身份管理</summary>');
+        const summary = [organizations.length ? `${organizations.length} 条组织资料` : '', candidates.length ? `${candidates.length} 条候选待确认` : '', merges.filter(m => m.status === 'active').length ? `${merges.filter(m => m.status === 'active').length} 条合并可撤销` : ''].filter(Boolean).join(' · ');
+        if (summary) details.append($('<p class="nlc-muted">').text(summary));
+        organizations.forEach(org => {
+            const item = $('<article class="nlc-item nlc-organization">').attr('data-organization-id',org.id).append($('<b>').text(org.name || org.id));
+            if (org.description) item.append($('<p>').text(org.description));
+            const evidence = identityEvidenceText(org.identityEvidence); if (evidence) item.append($('<p class="nlc-muted">').text(`身份依据：${evidence}`));
+            item.append($('<p class="nlc-muted">').text('组织仅保存资料；此处没有组织状态栏、动态或试聊。'), button('这是人物', 'classify-person', { 'data-entity-id':org.id }).prop('disabled', typeof adapter.classifyEntity !== 'function'));
+            details.append(item);
+        });
+        candidates.forEach(candidate => {
+            const item = $('<article class="nlc-item nlc-identity-candidate">').attr('data-identity-candidate-id',candidate.id).append($('<b>').text(candidate.name || candidate.id));
+            if (candidate.description) item.append($('<p>').text(candidate.description));
+            if (Array.isArray(candidate.aliases) && candidate.aliases.length) item.append($('<p class="nlc-muted">').text(`其他称呼：${candidate.aliases.join('、')}`));
+            const evidence = identityEvidenceText(candidate.identityEvidence); if (evidence) item.append($('<p class="nlc-muted">').text(`身份依据：${evidence}`));
+            item.append($('<p class="nlc-muted">').text('待确认身份；可确认为人物、标记组织，或保留为未知称呼。'), $('<div class="nlc-row">').append(button('确认人物', 'classify-person', { 'data-entity-id':candidate.id }).prop('disabled', typeof adapter.classifyEntity !== 'function'), button('标记组织', 'classify-organization', { 'data-entity-id':candidate.id }).prop('disabled', typeof adapter.classifyEntity !== 'function'), button('保留称呼（unknown）', 'classify-unknown', { 'data-entity-id':candidate.id }).prop('disabled', typeof adapter.classifyEntity !== 'function')));
+            details.append(item);
+        });
+        merges.forEach(merge => {
+            const item = $('<article class="nlc-item nlc-identity-merge">').attr('data-identity-merge-id',merge.id).append($('<b>').text(`${merge.fromName || merge.fromId} → ${merge.toName || merge.toId}`), $('<p>').text(`状态：${merge.status === 'active' ? '已合并' : '已撤销'}`));
+            const evidence = identityEvidenceText(merge.evidence); if (evidence) item.append($('<p class="nlc-muted">').text(`合并依据：${evidence}`));
+            if (merge.conflicts?.length) item.append($('<p class="nlc-muted">').text(`冲突：${merge.conflicts.map(conflict => typeof conflict === 'string' ? conflict : JSON.stringify(conflict)).join('；')}`));
+            item.append($('<p class="nlc-muted">').text('撤销仅恢复联系人分栏，不拆分合并期间产生的新历史；请核对人物状态。'));
+            if (merge.status === 'active') item.append(button('撤销合并…', 'undo-entity-merge', { 'data-merge-id':merge.id }).prop('disabled', typeof adapter.undoEntityMerge !== 'function'));
+            details.append(item);
+        });
+        if (!organizations.length && !candidates.length && !merges.length) details.append(empty('暂无组织资料、身份候选或合并记录。'));
+        return details;
+    }
     // 展示历史筛选、归档联系人恢复入口和只读记忆表。
     function archive() {
         const page = $('<div class="nlc-page">'), who = $('<select class="text_pole" data-field="archive-npc"><option value="">全部联系人</option></select>'), filterDraft = generalDrafts['档案'] || {};
@@ -239,7 +278,7 @@ export function mountConsole(adapter) {
         const memory = $('<details class="nlc-memory nlc-card" data-draft-details="memory"><summary>增强记忆表</summary></details>');
         if (!state.memory?.available) memory.append($('<p class="nlc-muted">').text(state.memory?.message || '记忆存储不可用。'));
         else (state.memory.tables || []).forEach((t,i) => { const table = $('<details>').attr('data-draft-details', `memory-${i}`).append($('<summary>').text(t.name || '数据表')); table.append($('<pre class="nlc-pre">').text(JSON.stringify(t.data ?? [], null, 2))); memory.append(table); });
-        memory.append(button('刷新记忆', 'memory-refresh')); page.append(archived, events, diaries, memory); pages.append(page);
+        memory.append(button('刷新记忆', 'memory-refresh')); page.append(identityManagement(), archived, events, diaries, memory); pages.append(page);
     }
     // 原生 Connection Manager 的配置流程，不在控制台伪造参数输入。
     function connectionGuide() {
@@ -323,6 +362,57 @@ export function mountConsole(adapter) {
         catch (error) { if (epoch === modalEpoch && !destroyed) channelDialog.find('[data-channel-status]').text(error?.message || String(error)).addClass('is-error'); }
         finally { if (epoch === modalEpoch) { modalBusy = false; channelDialog.find('[data-channel-test]').prop('disabled',false); } }
     }
+    // 分类与合并是显式身份操作；弹窗确认时重新验证快照，避免过期状态写入。
+    function confirmEntityAction(kind, entity) {
+        const identity = state.identity, entityId = entity.id;
+        const titles = { person:'确认设为人物', organization:'确认标记为组织', unknown:'确认保留为未知称呼', merge:'确认合并身份', undo:'确认撤销合并' };
+        showDialog(titles[kind] || '确认身份操作', 'confirm-entity');
+        const body = channelDialog.find('.nlc-channel-body'), evidence = identityEvidenceText(entity.identityEvidence ?? entity.evidence);
+        const descriptions = {
+            person:'将此身份归类为人物；核心会更新实体分类。',
+            organization:'将此身份归类为组织，仅保存资料与身份依据，不生成组织状态、动态或试聊。',
+            unknown:'保留为待确认的未知称呼，不创建联系人或组织状态。',
+            merge:`将「${entity.fromName}」合并到「${entity.toName}」。请确认这两个称呼确实指向同一人物。仅保留目标人物为联系人；已有历史保留原始人物 ID，不代表全部转移到目标。状态冲突需人工核对；撤销不会反向拆分新历史。`,
+            undo:'撤销此合并只影响现有合并关系；新产生的历史不会反向拆分。请核对人物状态与相关计划。'
+        };
+        body.append($('<p>').text(descriptions[kind] || ''), evidence ? $('<p class="nlc-muted">').text(`身份依据：${evidence}`) : '', $('<div class="nlc-channel-actions">').append($('<button type="button" class="menu_button" data-channel-done>取消</button>'), $('<button type="button" class="menu_button" data-confirm-entity>').text(titles[kind] || '确认')), $('<div class="nlc-status" data-entity-status role="status" aria-live="polite">'));
+        const confirmationEpoch = modalEpoch;
+        body.find('[data-confirm-entity]').on('click.nlcConfirm', async () => {
+            if (modalBusy) return;
+            const fresh = adapter.snapshot() || {};
+            const list = kind === 'undo' ? fresh.identityMerges : [...canonicalPersons(fresh), ...(fresh.identityCandidates || []), ...(fresh.organizations || [])];
+            const current = list?.find(item => item.id === entityId);
+            const missingEntity = ['person','organization','unknown','undo'].includes(kind) && (!current || JSON.stringify(current) !== JSON.stringify(entity));
+            const freshPeople = canonicalPersons(fresh);
+            const missingSource = kind === 'merge' && (!freshPeople.some(person => person.id === entity.fromId) || !freshPeople.some(person => person.id === entity.toId) || entity.fromId === entity.toId);
+            if (fresh.identity !== identity || missingEntity || missingSource) {
+                closeDialog(); render(false); tell('身份记录已变化，请检查后重新操作。', true); return;
+            }
+            if (busy || fresh.busy) { body.find('[data-entity-status]').text('其他任务处理中，请稍后再确认。').addClass('is-error'); return; }
+            modalBusy = true; body.find('[data-confirm-entity]').prop('disabled', true); body.find('[data-entity-status]').text('处理中…').removeClass('is-error');
+            const invoke = kind === 'merge' ? () => adapter.mergeEntities(entity.fromId, entity.toId) : kind === 'undo' ? () => adapter.undoEntityMerge(entityId) : () => adapter.classifyEntity(entityId, kind);
+            const applied = await run(() => { const method = kind === 'merge' ? 'mergeEntities' : kind === 'undo' ? 'undoEntityMerge' : 'classifyEntity'; if (typeof adapter[method] !== 'function') throw new Error(`当前核心尚未提供 ${method} 接口。`); return invoke(); }, () => {
+                if (kind === 'merge' && npcId === entity.fromId) { npcId = entity.toId; diaryId = ''; }
+                tell(kind === 'merge' ? '身份已合并，历史保留原始人物 ID。' : kind === 'undo' ? '合并已撤销；新历史不会反向拆分。' : '身份分类已更新。');
+            });
+            if (confirmationEpoch !== modalEpoch || destroyed) return;
+            modalBusy = false;
+            if (applied) closeDialog();
+            else { body.find('[data-entity-status]').text(status.text()).toggleClass('is-error', status.hasClass('is-error')); body.find('[data-confirm-entity]').prop('disabled', false); }
+        });
+        body.find('[data-channel-done]')[0].focus();
+    }
+    function openEntityMerge(entityId) {
+        const source = canonicalPersons().find(person => person.id === entityId); if (!source) return;
+        showDialog('合并到人物', 'merge-entity');
+        const body = channelDialog.find('.nlc-channel-body'), targets = canonicalPersons().filter(person => person.id !== source.id);
+        const select = $('<select class="text_pole" data-merge-target><option value="">选择目标人物</option></select>');
+        targets.forEach(person => select.append($('<option>').val(person.id).text(`${person.name || person.id}${aliasesText(person) ? ` · ${aliasesText(person)}` : ''}`)));
+        body.append($('<p>').text(`来源人物：${source.name || source.id}`), $('<label class="nlc-field">').append($('<span>').text('合并到'), select), $('<p class="nlc-muted">').text('请仅合并有同人依据的称呼，不会根据同场出现或关系自动合并。合并后只保留目标联系人；已有历史保留原始人物 ID，不会自动搬迁所有记录。冲突需人工核对，撤销不会反向拆分新历史。'), $('<div class="nlc-channel-actions">').append($('<button type="button" class="menu_button" data-channel-done>取消</button>'), $('<button type="button" class="menu_button" data-start-entity-merge>').text('继续确认').prop('disabled', !targets.length || !select.val() || typeof adapter.mergeEntities !== 'function')));
+        select.on('change', () => body.find('[data-start-entity-merge]').prop('disabled', !select.val() || typeof adapter.mergeEntities !== 'function'));
+        body.find('[data-start-entity-merge]').on('click.nlcConfirm', () => { const target = canonicalPersons().find(person => person.id === select.val()); if (!target) { tell('请选择仍然活跃的目标人物。', true); return; } closeDialog(false); confirmEntityAction('merge', { id:source.id, fromId:source.id, toId:target.id, fromName:source.name || source.id, toName:target.name || target.id }); });
+        body.find('[data-channel-done]')[0].focus();
+    }
     // 删除与永久忽略均明确说明保留历史且可从档案恢复。
     function confirmArchive(ignored) {
         const npc = (state.npcs || []).find(n => n.id === npcId); if (!npc) return;
@@ -370,6 +460,9 @@ export function mountConsole(adapter) {
         if (action === 'cancel-map') { if (generalDrafts['地图']) delete generalDrafts['地图']['field:map-json']; render(false); tell('地图导入草稿已取消。'); return; }
         if (action === 'edit-secondary-profile') { openChannelDialog(); return; }
         if (action === 'archive-npc' || action === 'ignore-npc') { if (!busy && !state.busy) confirmArchive(action === 'ignore-npc'); return; }
+        if (action === 'open-entity-merge') { if (!busy && !state.busy) openEntityMerge(el.attr('data-entity-id')); return; }
+        if (action === 'classify-person' || action === 'classify-organization' || action === 'classify-unknown') { const id = el.attr('data-entity-id'), entity = [...canonicalPersons(), ...(state.identityCandidates || []), ...(state.organizations || [])].find(item => item.id === id); const kind = action === 'classify-person' ? 'person' : action === 'classify-organization' ? 'organization' : 'unknown'; if (entity && !busy && !state.busy) confirmEntityAction(kind, entity); return; }
+        if (action === 'undo-entity-merge') { const merge = (state.identityMerges || []).find(item => item.id === el.attr('data-merge-id') && item.status === 'active'); if (merge && !busy && !state.busy) confirmEntityAction('undo', merge); return; }
         if (action === 'restore-npc') { const id = el.attr('data-npc'); run(() => { if (typeof adapter.restoreNpc !== 'function') throw new Error('当前核心尚未提供联系人恢复接口。'); return adapter.restoreNpc(id); }, () => tell('联系人已恢复，历史记录继续保留。')); return; }
         if (action === 'diary') { const id = npcId, day = Number(root.find('[data-field="diary-day"]').val()), selected = root.find('[data-field="diary-chars"]').val(), chars = selected === 'custom' ? Number(root.find('[data-field="diary-custom"]').val()) : Number(selected); if (!Number.isInteger(day) || day < 1 || day > 1000000 || !Number.isInteger(chars) || chars < 1 || chars > 10000) { tell('日期须为 1–1000000 的整数，字数须为 1–10000 的整数。',true); return; } run(() => adapter.generateDiary(id,day,chars), result => { if (typeof result === 'string') diaryId = (state.diaries || []).find(d => d.npcId === id && d.day === day && d.text === result)?.id || ''; tell('日记已生成并保存。'); }, { npc:id, tab:'联系人' }); return; }
         if (action === 'chat-send') { const text = String(root.find('[data-field="chat-text"]').val() || '').trim(), id = npcId; if (!text) return; run(() => adapter.sendChat(id,text), () => { if (drafts[id]?.['field:chat-text']?.trim() === text) drafts[id]['field:chat-text'] = ''; tell('试聊回复已记录。'); }, { npc:id, tab:'联系人' }); return; }

@@ -182,7 +182,9 @@ test('causeIds仅限存在且全体参与者知情的事件，同地点away不�
     const r = rules(2);
     let timeline = createTimeline();
     timeline.events = [
-        { id: 'all', knownBy: ['n0', 'n1'] }, { id: 'private', knownBy: ['n0'] }, { id: 'player', knownBy: ['player'] },
+        { id: 'all', knownBy: ['n0', 'n1'], npcIds: ['n0', 'n1'], locationId: 'a' },
+        { id: 'private', knownBy: ['n0'], npcIds: ['n0'], locationId: 'a' },
+        { id: 'player', knownBy: ['player'], npcIds: ['n0'], locationId: 'a' },
     ];
     timeline = turn(timeline, 's', 0, [plan([activity(1)], ['n0', 'n1'], { knownEventIds: ['all', 'private', 'player', 'missing'] })], r).timeline;
     const done = turn(timeline, 'done', 1, [], r).timeline;
@@ -324,4 +326,90 @@ test('所有输入保持不变且返回全新clone，projection与turn内记录�
     assert.equal(result.timeline.turns.at(-1).projections[0].value, '阅读');
     result.timeline.baselineSources.push({ key: '新值' });
     assert.equal(timeline.baselineSources.length, 0);
+});
+
+test('非person和merged source的新旧计划均blocked，不消耗步骤、不投影或产生事件', () => {
+    for (const patch of [{ entityType: 'organization' }, { entityType: 'unknown' }, { entityType: 'person', mergedInto: 'n1' }]) {
+        const r = rules(2);
+        const existing = turn(createTimeline(), 's', 0, [plan([activity(10)], ['n0', 'n1'])], r).timeline;
+        Object.assign(r.npcs[1], patch);
+        const before = structuredClone(existing);
+        const result = turn(freeze(existing), 'blocked', 60, [], freeze(r));
+        assert.equal(result.timeline.plans[0].status, 'blocked');
+        assert.equal(result.timeline.plans[0].steps[0].remainingMinutes, 10);
+        assert.deepEqual(result.projections, []);
+        assert.deepEqual(result.timeline.events, []);
+        assert.deepEqual(existing, before);
+        const fresh = turn(createTimeline(), 'new', 60, [plan([activity(10)], ['n0', 'n1'])], r);
+        assert.equal(fresh.timeline.plans[0].status, 'blocked');
+        assert.deepEqual(fresh.projections, []);
+    }
+});
+
+test('context不注入组织unknown合并来源的旧事件，合并不会继承private知情', () => {
+    const r = rules(2); r.states.n0.scene = 'present';
+    const initial = turn(createTimeline(), 's', 0, [plan([activity(1, { major: false })], ['n0', 'n1'])], r).timeline;
+    const done = turn(initial, 'd', 1, [], r).timeline;
+    for (const patch of [{ entityType: 'organization' }, { entityType: 'unknown' }, { mergedInto: 'n0' }]) {
+        const now = rules(2); now.states.n0.scene = 'present'; Object.assign(now.npcs[1], patch);
+        assert.equal(timelineContext(done, now), '');
+    }
+    const privateTimeline = createTimeline();
+    privateTimeline.events.push({ id: 'private', npcIds: ['n1'], knownBy: ['n1'], summary: '不可泄漏', locationId: 'a', clockMinutes: 0 });
+    r.npcs[1].mergedInto = 'n0';
+    assert.equal(timelineContext(privateTimeline, r), '');
+    const next = turn(privateTimeline, 'new', 0, [plan([activity(1, { major: false })], ['n0'], { knownEventIds: ['private'] })], r);
+    assert.deepEqual(next.timeline.plans[0].knownEventIds, []);
+});
+
+test('旧v2无类型与显式person均可执行计划，非person同行成员不会被裁剪后拆组执行', () => {
+    for (const explicit of [false, true]) {
+        const r = rules(); if (explicit) r.npcs[0].entityType = 'person';
+        const start = turn(createTimeline(), 's', 0, [plan([activity(1)])], r).timeline;
+        assert.equal(turn(start, 'd', 1, [], r).timeline.plans[0].status, 'completed');
+    }
+    const r = rules(2); r.npcs[1].entityType = 'organization';
+    r.parties = [{ members: ['n0', 'n1'], confirmed: true }];
+    const result = turn(createTimeline(), 'split', 0, [plan()], r);
+    assert.equal(result.timeline.plans[0].status, 'blocked');
+    assert.deepEqual(result.projections, []);
+});
+
+test('beta5: canonicalId and redirects block new and old plans without consuming step time', () => {
+    for (const id of [null, undefined, '', 42, 'missing']) {
+        const result = turn(createTimeline(), 'invalid-ref', 60, [plan([activity(10)], ['n0', id])]);
+        assert.equal(result.timeline.plans[0].status, 'blocked');
+        assert.deepEqual(result.projections, []);
+        assert.deepEqual(result.timeline.events, []);
+    }
+    for (const patch of [{ canonicalId: 'n1' }, { entityType: null }, { archived: true }, { ignored: true }, { tracked: false }, { confirmed: false }, { redirect: true }]) {
+        const r = rules(2), initial = turn(createTimeline(), 's', 0, [plan([activity(10)])], r).timeline;
+        Object.assign(r.npcs[0], patch);
+        if (patch.redirect) r.entityRedirects = { n0: 'n1' };
+        for (const result of [turn(initial, 'old', 60, [], r), turn(createTimeline(), 'new', 60, [plan([activity(10)])], r)]) {
+            assert.equal(result.timeline.plans[0].status, 'blocked');
+            assert.equal(result.timeline.plans[0].steps[0].remainingMinutes, 10);
+            assert.deepEqual(result.projections, []);
+            assert.deepEqual(result.timeline.events, []);
+        }
+    }
+});
+
+test('beta5: context and causes reject invalid entity references without redirecting knowledge', () => {
+    const r = rules(2); r.states.n0.scene = 'present';
+    const event = { id: 'secret', npcIds: ['n0'], knownBy: ['n0', 'player'], locationId: 'a', summary: 'SECRET', clockMinutes: 0 };
+    const variants = [{ npcIds: undefined }, { npcIds: [] }, { npcIds: ['n0', 'missing'] }, { knownBy: ['n0', 'player', 'missing'] }, { locationId: 'missing' }];
+    for (const patch of variants) {
+        const timeline = createTimeline(); timeline.events = [{ ...event, ...patch }];
+        assert.equal(timelineContext(timeline, r), '');
+        const result = turn(timeline, 'new', 0, [plan([activity(1, { major: false })], ['n0'], { knownEventIds: ['secret'] })], r);
+        assert.deepEqual(result.timeline.plans[0].knownEventIds, []);
+    }
+    for (const patch of [{ entityType: 'organization' }, { entityType: 'unknown' }, { mergedInto: 'n0' }, { canonicalId: 'n0' }]) {
+        const now = rules(2); now.states.n0.scene = 'present'; Object.assign(now.npcs[1], patch);
+        const timeline = createTimeline(); timeline.events = [{ ...event, knownBy: ['n0', 'n1', 'player'] }];
+        assert.equal(timelineContext(timeline, now), '');
+    }
+    const timeline = createTimeline(); timeline.events = [event]; r.entityRedirects = { n0: 'n1' };
+    assert.equal(timelineContext(timeline, r), '');
 });

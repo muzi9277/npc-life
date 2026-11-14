@@ -18,7 +18,8 @@ const source = originalSource
 assert.doesNotMatch(source, /^import\s/m);
 const names = [
     'activeData', 'rootSettings', 'makeNpc', 'makeNpcState', 'makeLocation', 'mergeCatalog',
-    'ensureCatalog', 'archiveNpc', 'restoreNpc', 'activeNpc', 'resolveEntity', 'confirmedLocation',
+    'ensureCatalog', 'discoverCatalog', 'classifyNpc', 'mergeNpcIdentity', 'undoNpcMerge',
+    'archiveNpc', 'restoreNpc', 'activeNpc', 'resolveEntity', 'confirmedLocation',
     'messageAnchors', 'canonFields', 'observeCanonFields', 'revokeCanonFact', 'revokeMissingCanonFacts',
     'normalizeFact', 'applyCanonFact', 'extractStoryFacts', 'addEvent', 'save', 'savePreferences',
     'findRoute', 'validateTransition', 'evaluateAppearanceRequest', 'evaluateRequestMotivation', 'confirmTravelPlan',
@@ -43,7 +44,7 @@ function deferred() {
     return { promise, resolve };
 }
 
-function fixture() {
+function fixture({ trackNpc = false, entries = [] } = {}) {
     const calls = { requests: [], saves: 0, prompts: [], timelineContexts: [] };
     const ctx = {
         extensionSettings: {}, characterId: 0, chatId: 'chat-a', name1: '沈遥', chat: [],
@@ -52,6 +53,7 @@ function fixture() {
                 { keys: ['林青'], comment: '人物', content: '林青住在北塔。' },
                 { keys: ['北塔'], comment: '地点：北塔', content: '北塔是要塞。' },
                 { keys: ['南门'], comment: '地点：南门', content: '南门是出口。' },
+                ...entries,
             ] } } },
             { name: 'World B', avatar: 'world-b.png', data: { character_book: { entries: [
                 { keys: ['林青'], comment: '人物', content: '林青居住在海港。' },
@@ -103,6 +105,8 @@ function fixture() {
     const south = data.world.catalog.locations.find(item => item.name === '南门');
     assert.ok(npc && north && south, 'real card discovery should seed the fixture');
     npc.confirmed = true;
+    // Discovery is deliberately untracked. Generation tests opt into tracking explicitly.
+    if (trackNpc) npc.tracked = true;
     north.confirmed = south.confirmed = true;
     const friend = api.makeNpc('顾宁', 'manual');
     data.world.catalog.npcs.push(friend);
@@ -115,6 +119,247 @@ function fixture() {
         respond(value) { response = typeof value === 'function' ? value : JSON.stringify(value); },
     };
 }
+
+const mixedIdentityEntry = {
+    keys: ['林舟', '室友', '夜莺商会'], comment: '人物',
+    content: '姓名：林舟。林舟是一名医生。室友是人物关系称呼，未注明具体姓名。夜莺商会是一个组织。',
+};
+const identityCard = entries => ({ data: { character_book: { entries } } });
+const emptyIdentityWorld = () => ({ catalog: { npcs: [], locations: [], routes: [] }, chats: {} });
+
+test('identity discovery classifies each key in a person section as person, organization or unknown', () => {
+    const f = fixture();
+    const discovered = f.api.discoverCatalog(identityCard([mixedIdentityEntry]));
+    assert.deepEqual(discovered.npcs.map(item => [item.name, item.entityType]), [['林舟', 'person']]);
+    assert.deepEqual(discovered.organizations.map(item => [item.name, item.entityType]), [['夜莺商会', 'organization']]);
+    assert.deepEqual(discovered.identityCandidates.map(item => [item.name, item.entityType]), [['室友', 'unknown']]);
+    assert.equal(discovered.npcs[0].tracked, false);
+    assert.equal(discovered.npcs[0].confirmed, false);
+    const world = emptyIdentityWorld();
+    f.api.mergeCatalog(world, discovered);
+    assert.equal(f.api.resolveEntity(world, '林舟', 'npc').id, discovered.npcs[0].id);
+    for (const entity of [...world.catalog.organizations, ...world.catalog.identityCandidates]) {
+        assert.equal(f.api.activeNpc(entity), false);
+        assert.equal(f.api.activeNpc({ ...entity, tracked: true, confirmed: true }), false);
+        assert.equal(f.api.resolveEntity(world, entity.name, 'npc'), null);
+        assert.equal(f.api.resolveEntity(world, entity.id, 'npc'), null);
+    }
+});
+
+test('identity discovery creates one canonical person for an explicit same-entry alias', () => {
+    const f = fixture(), world = emptyIdentityWorld();
+    const discovered = f.api.discoverCatalog(identityCard([{
+        keys: ['林舟', '舟影'], comment: '人物', content: '姓名：林舟。林舟又名舟影。林舟是一名医生。',
+    }]));
+    assert.equal(discovered.npcs.length, 1);
+    assert.deepEqual(new Set([discovered.npcs[0].name, ...discovered.npcs[0].aliases]), new Set(['林舟', '舟影']));
+    assert.equal(discovered.organizations.length, 0);
+    assert.equal(discovered.identityCandidates.length, 0);
+    f.api.mergeCatalog(world, discovered);
+    const canonical = world.catalog.npcs[0];
+    assert.equal(f.api.resolveEntity(world, '林舟', 'npc'), canonical);
+    assert.equal(f.api.resolveEntity(world, '舟影', 'npc'), canonical);
+});
+
+test('identity discovery keeps two real characters distinct despite same-world co-occurrence', () => {
+    const f = fixture(), world = emptyIdentityWorld();
+    f.api.mergeCatalog(world, f.api.discoverCatalog(identityCard([
+        { keys: ['林舟'], comment: '人物', content: '姓名：林舟。林舟是一名医生，认识顾宁。' },
+        { keys: ['顾宁'], comment: '人物', content: '姓名：顾宁。顾宁是一名老师，认识林舟。' },
+    ])));
+    assert.equal(world.catalog.npcs.length, 2);
+    const lin = f.api.resolveEntity(world, '林舟', 'npc'), gu = f.api.resolveEntity(world, '顾宁', 'npc');
+    assert.ok(lin && gu);
+    assert.notEqual(lin.id, gu.id);
+    assert.deepEqual(lin.aliases, []);
+    assert.deepEqual(gu.aliases, []);
+    assert.equal(lin.mergedInto, undefined);
+    assert.equal(gu.mergedInto, undefined);
+    assert.equal(world.catalog.identityMerges.length, 0);
+});
+
+test('explicit alias across separate entries joins the existing stable ID and remains idempotent', () => {
+    const f = fixture(), world = emptyIdentityWorld();
+    const original = { keys: ['舟影'], comment: '人物', content: '姓名：舟影。舟影是一名医生。' };
+    f.api.mergeCatalog(world, f.api.discoverCatalog(identityCard([original])));
+    const stableId = world.catalog.npcs[0].id;
+    const entries = [original, {
+        keys: ['林舟'], comment: '人物', content: '姓名：林舟。林舟又名舟影。林舟是一名医生。',
+    }];
+    f.api.mergeCatalog(world, f.api.discoverCatalog(identityCard(entries)));
+    assert.equal(world.catalog.npcs.length, 1, 'unambiguous explicit alias must not create a second canonical person');
+    assert.equal(world.catalog.npcs[0].id, stableId, 'new display-name evidence cannot replace the original stable ID');
+    assert.equal(f.api.resolveEntity(world, '林舟', 'npc').id, stableId);
+    assert.equal(f.api.resolveEntity(world, '舟影', 'npc').id, stableId);
+    const before = structuredClone(world.catalog);
+    f.api.mergeCatalog(world, f.api.discoverCatalog(identityCard(entries)));
+    assert.deepEqual(world.catalog, before, 'repeated real discovery and merge cannot add identities or audit records');
+});
+
+test('cross-entry alias evidence for existing characters proposes review before explicit stable-ID merge', () => {
+    const entries = [
+        { keys: ['林舟'], comment: '人物', content: '姓名：林舟。林舟是一名医生。' },
+        { keys: ['舟影'], comment: '人物', content: '姓名：舟影。舟影是一名老师。' },
+    ];
+    const f = fixture({ entries });
+    const lin = f.api.resolveEntity(f.world, '林舟', 'npc'), shadow = f.api.resolveEntity(f.world, '舟影', 'npc');
+    assert.ok(lin && shadow);
+    assert.notEqual(lin.id, shadow.id);
+    f.chat.npcStates[lin.id].activity = '独立医生状态';
+    f.chat.npcStates[shadow.id].activity = '独立老师状态';
+    f.chat.events.push({ id: 'existing-identity-history', npcIds: [shadow.id], summary: '旧身份历史' });
+    const states = structuredClone(f.chat.npcStates), history = identityHistory(f.chat);
+    f.ctx.characters[0].data.character_book.entries.push({
+        keys: ['林舟'], comment: '人物', content: '姓名：林舟。林舟又名舟影。',
+    });
+    f.api.ensureCatalog(f.world, true);
+    assert.equal(f.api.resolveEntity(f.world, '林舟', 'npc').id, lin.id);
+    assert.equal(f.api.resolveEntity(f.world, '舟影', 'npc').id, shadow.id);
+    assert.equal(lin.mergedInto, undefined);
+    assert.equal(shadow.mergedInto, undefined);
+    assert.deepEqual(f.chat.npcStates, states);
+    assert.deepEqual(identityHistory(f.chat), history);
+    const proposal = f.world.catalog.identityCandidates.find(item => item.requiresReview
+        && item.sourceNpcIds?.includes(lin.id) && item.sourceNpcIds?.includes(shadow.id));
+    assert.ok(proposal, 'explicit cross-entry evidence should offer review for two preexisting stable identities');
+    assert.deepEqual(new Set(proposal.sourceNpcIds), new Set([lin.id, shadow.id]));
+    assert.deepEqual(new Set(proposal.targetNpcIds), new Set([lin.id, shadow.id]));
+    const record = f.api.mergeNpcIdentity(shadow.id, lin.id, '用户审核了跨条目的明确别名证据');
+    assert.equal(record.fromId, shadow.id);
+    assert.equal(record.toId, lin.id);
+    assert.equal(f.api.resolveEntity(f.world, '舟影', 'npc').id, lin.id);
+    assert.equal(f.world.catalog.npcs.find(item => item.id === shadow.id).mergedInto, lin.id);
+    assert.deepEqual(f.chat.npcStates, states);
+    assert.deepEqual(identityHistory(f.chat), history);
+});
+
+test('real card rescans preserve manual tracked contacts, calibrated identity and dynamic states', () => {
+    const f = fixture({ entries: [mixedIdentityEntry] });
+    const discovered = f.world.catalog.npcs.find(item => item.name === '林舟');
+    assert.equal(discovered.tracked, false);
+    assert.equal(f.npc.tracked, false, 'ordinary discovery fixture must not opt into simulation');
+    assert.equal(f.friend.tracked, true, 'manual makeNpc retains its tracking default');
+    assert.equal(f.api.makeNpc('旧联系人', 'legacy').tracked, true);
+    f.friend.aliases = ['小宁'];
+    f.npc.tracked = true; // This contact has been explicitly selected by the user.
+    f.npc.aliases = ['青先生'];
+    const snapshot = () => {
+        const catalog = structuredClone(f.world.catalog);
+        delete catalog.scannedAt;
+        return { catalog, states: structuredClone(f.chat.npcStates) };
+    };
+    const before = snapshot();
+    for (let pass = 0; pass < 3; pass++) {
+        assert.equal(f.api.ensureCatalog(f.world, true), true);
+        f.api.activeData();
+        assert.deepEqual(snapshot(), before);
+        assert.equal(f.api.resolveEntity(f.world, '小宁', 'npc').id, f.friend.id);
+        assert.equal(f.api.resolveEntity(f.world, '青先生', 'npc').id, f.npc.id);
+    }
+});
+
+test('explicit classification enables only people; organization and unknown never become active NPCs', () => {
+    const f = fixture({ entries: [mixedIdentityEntry] });
+    const candidate = f.world.catalog.identityCandidates.find(item => item.name === '室友');
+    const organization = f.world.catalog.organizations.find(item => item.name === '夜莺商会');
+    assert.ok(candidate && organization);
+    assert.equal(f.chat.npcStates[candidate.id], undefined);
+    assert.equal(f.chat.npcStates[organization.id], undefined);
+    f.api.classifyNpc(candidate.id, 'person');
+    const person = f.api.resolveEntity(f.world, '室友', 'npc');
+    assert.ok(person);
+    assert.equal(person.entityType, 'person');
+    assert.equal(person.tracked, true);
+    assert.equal(person.confirmed, true);
+    assert.equal(f.world.catalog.identityCandidates.some(item => item.id === candidate.id), false);
+    f.api.activeData();
+    const state = structuredClone(f.chat.npcStates[person.id]);
+    f.api.classifyNpc(person.id, 'organization');
+    assert.equal(f.api.activeNpc(person), false);
+    assert.equal(person.tracked, false);
+    assert.equal(f.api.resolveEntity(f.world, '室友', 'npc'), null);
+    assert.deepEqual(f.chat.npcStates[person.id], state, 'classification retains existing state for review');
+    f.api.classifyNpc(person.id, 'unknown');
+    assert.equal(f.api.activeNpc(person), false);
+    assert.equal(person.confirmed, false);
+    assert.equal(f.api.resolveEntity(f.world, person.id, 'npc'), null);
+    assert.deepEqual(f.chat.npcStates[person.id], state);
+    assert.throws(() => f.api.mergeNpcIdentity(person.id, f.npc.id), /人物|活跃/);
+    assert.equal(f.world.catalog.identityMerges.length, 0, 'unknown identity cannot be merged as an active person');
+    assert.throws(() => f.api.classifyNpc(person.id, 'location'), /分类/);
+});
+
+const identityHistory = chat => structuredClone({
+    events: chat.events, diaries: chat.diaries, conversations: chat.conversations,
+    parties: chat.parties, factLedger: chat.factLedger, pendingFacts: chat.pendingFacts,
+    canonFacts: chat.canonFacts, travelPlans: chat.travelPlans, appearanceRequests: chat.appearanceRequests,
+    turns: chat.timeline?.turns,
+});
+
+test('identity merge conflicts pause each chat without migrating states/history; undo restores contact and keeps history', () => {
+    const f = fixture();
+    f.ctx.chatId = 'identity-peer';
+    const peer = f.api.activeData().chat;
+    f.api.activeData();
+    f.ctx.chatId = 'chat-a';
+    f.store.preferences.autoMode = 'world';
+    f.npc.aliases = ['青先生'];
+    f.friend.aliases = ['小宁'];
+    for (const chat of [f.chat, peer]) {
+        Object.assign(chat.npcStates[f.npc.id], { locationId: f.north.id, activity: '目标活动', source: 'manual' });
+        Object.assign(chat.npcStates[f.friend.id], { locationId: f.south.id, activity: '来源活动', source: 'canon' });
+        chat.events.push({ id: `history:${chat.id}`, npcIds: [f.friend.id], participants: [f.friend.id], summary: '来源人物旧事件' });
+        chat.diaries.push({ id: 'diary', npcId: f.friend.id, text: '来源人物旧日记' });
+        chat.conversations[f.friend.id] = [{ role: 'assistant', content: '来源人物旧试聊' }];
+        chat.parties.push({ id: 'party', members: [f.npc.id, f.friend.id], locationId: f.north.id });
+        chat.factLedger.push({ id: 'identity-fact', subjects: [f.friend.id], status: 'active', authority: 'canon' });
+        chat.pendingFacts.push({ id: 'identity-proposal', subjects: [f.friend.id] });
+        chat.canonFacts.push({ id: 'identity-fact', subjects: [f.friend.id], valid: true });
+        chat.travelPlans.push({ id: 'old-trip', npcIds: [f.friend.id], status: 'in_transit', targetLocationId: f.south.id });
+        chat.appearanceRequests.push({ id: 'old-request', npcId: f.friend.id, status: 'needs_info' });
+        chat.timeline = { baseDay: 1, clockMinutes: 0, turns: [{ id: 'old-turn', events: [{ npcIds: [f.friend.id], summary: '旧事务' }] }] };
+    }
+    f.api.activeData();
+    const snapshots = [f.chat, peer].map(chat => ({ states: structuredClone(chat.npcStates), history: identityHistory(chat) }));
+    const targetAliases = structuredClone(f.npc.aliases);
+    const record = f.api.mergeNpcIdentity(f.friend.id, f.npc.id, '玩家明确确认二者是同一人');
+    assert.equal(record.fromId, f.friend.id);
+    assert.equal(record.toId, f.npc.id);
+    assert.equal(record.status, 'active');
+    assert.equal(record.conflicts.length, 2);
+    assert.equal(f.friend.mergedInto, f.npc.id);
+    assert.equal(f.api.activeNpc(f.friend), false);
+    assert.equal(f.friend.tracked, false);
+    assert.equal(f.api.resolveEntity(f.world, '顾宁', 'npc').id, f.npc.id);
+    assert.equal(f.api.resolveEntity(f.world, '小宁', 'npc').id, f.npc.id);
+    for (const [index, chat] of [f.chat, peer].entries()) {
+        assert.deepEqual(chat.npcStates, snapshots[index].states, 'merge must preserve both complete states');
+        assert.deepEqual(identityHistory(chat), snapshots[index].history, 'merge must not rewrite historical entity references');
+        assert.match(chat.timeline.pausedReason, /合并|核对/);
+        const review = chat.entityMergeReviews.find(item => item.fromId === f.friend.id && item.toId === f.npc.id);
+        assert.ok(review);
+        assert.equal(review.status, 'review');
+        assert.ok(review.fields.includes('locationId'));
+        assert.ok(review.fields.includes('activity'));
+    }
+    assert.equal(f.calls.prompts.at(-1)[1], '', 'conflicting identity merge clears world injection');
+    f.chat.events.push({ id: 'during-merge', npcIds: [f.npc.id], summary: '合并期间的新历史' });
+    const mergedHistory = [f.chat, peer].map(identityHistory);
+    assert.equal(f.api.undoNpcMerge(record.id), true);
+    assert.equal(record.status, 'undone');
+    assert.equal(f.friend.mergedInto, undefined);
+    assert.equal(f.api.activeNpc(f.friend), true);
+    assert.equal(f.friend.tracked, true);
+    assert.equal(f.api.resolveEntity(f.world, '顾宁', 'npc').id, f.friend.id, 'restored name resolves its own contact even when target appears first');
+    assert.equal(f.api.resolveEntity(f.world, '小宁', 'npc').id, f.friend.id);
+    assert.deepEqual(f.npc.aliases, targetAliases, 'undo removes only aliases introduced by this merge');
+    for (const [index, chat] of [f.chat, peer].entries()) {
+        assert.deepEqual(chat.npcStates, snapshots[index].states);
+        assert.deepEqual(identityHistory(chat), mergedHistory[index], 'undo retains old and newly created history');
+        assert.match(chat.timeline.pausedReason, /核对|基线/);
+    }
+    assert.throws(() => f.api.undoNpcMerge(record.id), /找不到|撤销/);
+});
 
 const field = (...path) => JSON.stringify(path);
 const eventFor = (f, overrides = {}) => ({ npcIds: [f.npc.id], participants: [f.npc.id],
@@ -657,7 +902,7 @@ test('travel scheduling/ETA: require motivation/current revision, no instant mov
 });
 
 test('simulation validator rejects teleport, unknown/unconfirmed entities, locks, present, fresh, archived and partial parties', () => {
-    const f = fixture();
+    const f = fixture({ trackNpc: true });
     const event = eventFor(f);
     const validate = raw => f.api.validateSimulationEvents(f.world, f.chat, [raw], new Set([f.npc.id, f.friend.id]));
     assert.equal(validate(event).length, 1);
@@ -680,7 +925,7 @@ test('simulation validator rejects teleport, unknown/unconfirmed entities, locks
 });
 
 test('simulateDay commits once, advances time, updates eligible NPCs and rejects already processed day', async () => {
-    const f = fixture(); f.friend.tracked = false;
+    const f = fixture({ trackNpc: true }); f.friend.tracked = false;
     f.respond({ events: [eventFor(f)] });
     await f.api.simulateDay();
     assert.equal(f.chat.day, 2); assert.equal(f.chat.npcStates[f.npc.id].updatedDay, 1);
@@ -693,7 +938,7 @@ test('simulateDay commits once, advances time, updates eligible NPCs and rejects
 });
 
 for (const mode of ['malformed', 'invalid', 'api-error']) test(`simulation ${mode} leaves day, events and NPC states unchanged`, async () => {
-    const f = fixture(); f.friend.tracked = false;
+    const f = fixture({ trackNpc: true }); f.friend.tracked = false;
     if (mode === 'malformed') f.respond(() => 'not JSON');
     else if (mode === 'invalid') f.respond({ events: [eventFor(f, { locationId: f.south.id })] });
     else f.respond(() => { throw new Error('mock generation failed'); });
@@ -705,7 +950,7 @@ for (const mode of ['malformed', 'invalid', 'api-error']) test(`simulation ${mod
 });
 
 for (const mode of ['card', 'chat', 'save', 'archive']) test(`in-flight simulation discards stale result after ${mode} change`, async () => {
-    const f = fixture(); f.friend.tracked = false;
+    const f = fixture({ trackNpc: true }); f.friend.tracked = false;
     const gate = deferred(), started = deferred();
     f.respond(() => { started.resolve(); return gate.promise; });
     const rejected = assert.rejects(f.api.simulateDay(), /改变|丢弃/);
@@ -738,7 +983,7 @@ test('no eligible NPCs still advance travel without generation; unstable chat id
 });
 
 test('scene gestures are presentation only and use the configured player name; preference saves do not invalidate state', async () => {
-    const f = fixture();
+    const f = fixture({ trackNpc: true });
     f.chat.npcStates[f.npc.id].scene = 'present'; f.chat.player.locationId = f.north.id;
     f.store.preferences.userName = '沈遥';
     f.respond({ gestures: [{ npcId: f.npc.id, text: '林青将雨伞挪到玄关边，回头看向沈遥。' }] });

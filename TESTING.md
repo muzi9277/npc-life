@@ -1,6 +1,6 @@
 # 测试说明
 
-版本目标：`3.0.0-beta.4`，运行环境：SillyTavern `1.17.0`。
+版本目标：`3.0.0-beta.5`，运行环境：SillyTavern `1.17.0`。
 
 ## 本地自动回归
 
@@ -30,7 +30,7 @@ ST_ROOT=/path/to/SillyTavern UI_LAYOUT=1 node --test tests/console.test.mjs
 
 ### 浏览器 UI 测试
 
-安装包含以下 9 个运行文件：`index.js`、`style.css`、`console.js`、`console.css`、`services.js`、`automation.js`、`timeline.js`、`world-service.js`、`manifest.json`。在浏览器加载扩展后执行 `Ctrl+F5`，确认扩展设置可打开，五页手机式控制台可切换，版本条诊断显示 `3.0.0-beta.4`。`services.js` 的职责包括 API 分流、只读记忆、独立后台试聊和地图导入。
+安装包含以下 9 个运行文件：`index.js`、`style.css`、`console.js`、`console.css`、`services.js`、`automation.js`、`timeline.js`、`world-service.js`、`manifest.json`。在浏览器加载扩展后执行 `Ctrl+F5`，确认扩展设置可打开，五页手机式控制台可切换，版本条诊断显示 `3.0.0-beta.5`。`services.js` 的职责包括 API 分流、只读记忆、独立后台试聊和地图导入。
 
 逐项检查：
 

@@ -8,6 +8,17 @@ const str = value => typeof value === 'string' ? value : '';
 const minutesValid = value => Number.isInteger(value) && value >= 0 && value <= MAX_MINUTES;
 const keys = sources => sources.map(source => source.key);
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const person = npc => !!npc && (npc.entityType === 'person'
+    || (npc.entityType === undefined && (npc.confirmed === true || npc.tracked === true)));
+const enabledNpc = npc => person(npc) && npc.tracked === true && npc.confirmed === true
+    && !npc.archived && !npc.ignored && !npc.mergedInto
+    && (npc.canonicalId === undefined || npc.canonicalId === npc.id);
+const hasRedirect = (redirects, id) => Object.prototype.hasOwnProperty.call(redirects || {}, id);
+const validEvent = (event, rules) => Array.isArray(event?.npcIds) && event.npcIds.length > 0
+    && event.npcIds.every(id => rules.npcs.some(npc => npc.id === id && enabledNpc(npc)))
+    && rules.locations?.some(location => location.id === event.locationId && location.confirmed === true)
+    && Array.isArray(event.knownBy) && event.knownBy.every(id => id === 'player'
+        || rules.npcs.some(npc => npc.id === id && enabledNpc(npc)));
 
 function chineseNumber(value) {
     if (/^\d+(?:\.\d+)?$/.test(value)) return Number(value);
@@ -66,6 +77,16 @@ export function createWorldService(host) {
     let busy = false, epoch = 0, error = '', disposed = false;
     const invalidReconciliations = new WeakMap();
     const data = () => host.data();
+    // 当前目录资格覆盖宿主可能尚未适配的 rules；不裁剪 parties，以保留完整同行闭包校验。
+    const rulesNow = () => {
+        const rules = host.rules(), catalog = data().world.catalog;
+        const byId = catalog?.npcs ? new Map(catalog.npcs.map(npc => [npc.id, npc])) : null;
+        const entityRedirects = { ...rules.entityRedirects, ...catalog?.entityRedirects };
+        return { ...rules, entityRedirects, npcs: (rules.npcs || []).filter(npc => {
+            const current = byId ? byId.get(npc.id) : npc;
+            return enabledNpc(current) && !hasRedirect(entityRedirects, npc.id);
+        }).map(npc => byId ? { ...npc, ...byId.get(npc.id) } : npc) };
+    };
     const tl = () => data().chat.timeline;
     const prefs = () => host.preferences?.() || data().store?.preferences || {};
     const modeOK = () => prefs().autoMode === 'world';
@@ -80,14 +101,14 @@ export function createWorldService(host) {
         const current = data();
         return { identity: host.identity(), chat: current.chat, world: current.world,
             stateRevision: current.chat.stateRevision, revision: tl()?.revision, timeline: tl(),
-            signature: host.messageSignature(), allSources: sources(), epoch, isCurrent, manual };
+            signature: host.messageSignature(), allSources: sources(), npcIds: rulesNow().npcs.map(npc => npc.id).sort(), epoch, isCurrent, manual };
     }
     function current(ticket) {
         const now = data();
         return !disposed && ticket.epoch === epoch && ticket.identity === host.identity() && ticket.chat === now.chat
             && ticket.world === now.world && ticket.stateRevision === now.chat.stateRevision
             && ticket.timeline === tl() && ticket.revision === tl()?.revision && ticket.signature === host.messageSignature()
-            && same(ticket.allSources, sources()) && modeOK()
+            && same(ticket.allSources, sources()) && same(ticket.npcIds, rulesNow().npcs.map(npc => npc.id).sort()) && modeOK()
             && (ticket.manual || (prefs().autoEnabled === true && ticket.isCurrent()));
     }
     function check(ticket) { if (!current(ticket)) throw new Error('世界或正文已变化，本次旧结果已丢弃。'); }
@@ -160,15 +181,15 @@ export function createWorldService(host) {
     function pendingCapture(ticket, analysis, delta, sourceKey, reason) {
         return { reason, timeEvidence: str(analysis?.timeEvidence), analysis: clone(analysis), deltaSources: clone(delta), sources: clone(ticket.allSources),
             signature: ticket.signature, identity: ticket.identity, stateRevision: ticket.stateRevision,
-            revision: ticket.revision, sourceKey: sourceKey || '' };
+            revision: ticket.revision, npcIds: clone(ticket.npcIds), sourceKey: sourceKey || '' };
     }
 
     function planningContext(rules, feedback) {
         const replace = new Set(feedback.filter(item => item.action === 'replace').map(item => item.npcId));
         const cancel = new Set(feedback.filter(item => item.action === 'cancel').map(item => item.npcId));
         const plans = tl().plans || [];
-        const eligible = (rules.npcs || []).filter(npc => !npc.archived && !npc.ignored && npc.tracked !== false
-            && npc.confirmed === true && !cancel.has(npc.id) && (replace.has(npc.id) || !plans.some(plan => ['active', 'blocked'].includes(plan.status) && plan.npcIds?.includes(npc.id))));
+        const eligible = (rules.npcs || []).filter(npc => enabledNpc(npc)
+            && !cancel.has(npc.id) && (replace.has(npc.id) || !plans.some(plan => ['active', 'blocked'].includes(plan.status) && plan.npcIds?.includes(npc.id))));
         // 一次请求只看一个独立角色或完整同行闭包；组内事件也只能取全员知情交集。
         const eligibleById = new Map(eligible.map(npc => [npc.id, npc]));
         const seen = new Set(), groups = [];
@@ -192,8 +213,8 @@ export function createWorldService(host) {
         }
         const start = Number.isSafeInteger(tl().planningCursor) ? tl().planningCursor % Math.max(groups.length, 1) : 0;
         const selected = groups[start] || [];
-        const sharedEvents = (tl().events || []).filter(event => selected.length
-            && selected.every(npc => event.knownBy?.includes(npc.id))).slice(-12);
+        const sharedEvents = (tl().events || []).filter(event => selected.length && validEvent(event, rules)
+            && selected.every(npc => event.knownBy.includes(npc.id))).slice(-12);
         const loreBudget = Math.min(6000, Math.max(0, Number(prefs().contextChars) || 6000));
         let remaining = loreBudget;
         const contexts = selected.map((npc, index) => {
@@ -209,7 +230,7 @@ export function createWorldService(host) {
     // 确认和自动路径共用收尾：计划仅是提议，由纯引擎验证并在轮末创建。
     async function finish(ticket, analysis, delta, deltaMinutes) {
         check(ticket);
-        const rules = host.rules(), feedback = feedbackFor(analysis, delta, rules);
+        const rules = rulesNow(), feedback = feedbackFor(analysis, delta, rules);
         const { contexts, nextCursor } = planningContext(rules, feedback);
         let plans = [];
         if (contexts.length) {
@@ -252,7 +273,7 @@ export function createWorldService(host) {
         try {
             check(ticket);
             const response = await host.request(ANALYSIS_SYSTEM, JSON.stringify({ sources: delta,
-                npcs: (host.rules().npcs || []).map(npc => ({ id: npc.id, name: npc.name })) }), 'analysis', () => check(ticket));
+                npcs: rulesNow().npcs.map(npc => ({ id: npc.id, name: npc.name })) }), 'analysis', () => check(ticket));
             check(ticket);
             const analysis = parseJSON(response), elapsed = autoMinutes(analysis, delta);
             if (elapsed === null) {
@@ -275,7 +296,8 @@ export function createWorldService(host) {
         if (!pending?.analysis || pending.reason !== 'time_confirmation') throw new Error('没有可确认的时间分析，请重设基线。');
         const ticket = capture(() => true, true);
         if (!modeOK() || pending.identity !== ticket.identity || pending.stateRevision !== ticket.stateRevision
-            || pending.revision !== ticket.revision || pending.signature !== ticket.signature || !same(pending.sources, ticket.allSources)) {
+            || pending.revision !== ticket.revision || pending.signature !== ticket.signature || !same(pending.sources, ticket.allSources)
+            || !same(pending.npcIds, ticket.npcIds)) {
             pause('待确认来源或状态已变化，请重设基线或重新分析。');
             throw new Error('待确认来源或状态已变化。');
         }

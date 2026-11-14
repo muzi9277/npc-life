@@ -160,7 +160,7 @@ test('replace反馈才补已有计划；blocked计划不会自动替换', async 
 
 test('计划上下文按knownBy隔离私密，拒绝跨角色借用秘密的计划', async () => {
     const f = fixture({ npcs: ['a', 'b'] }); await f.service.run();
-    f.chat.timeline.events.push({ id: 'secret-a', knownBy: ['a'], summary: 'a私密', npcIds: ['a'] },
+    f.chat.timeline.events.push({ id: 'secret-a', knownBy: ['a'], summary: 'a私密', npcIds: ['a'], locationId: 'home' },
         { id: 'unknown', knownBy: ['outsider'], summary: '没人可知', npcIds: ['outsider'] });
     f.add(); f.respond(task => task === 'analysis' ? analysis() : { plans: [
         { ...plan('b'), knownEventIds: ['secret-a'] }, plan('a')] });
@@ -197,8 +197,8 @@ test('完整同行组只收到共同知情事件，并按组轮转', async () =>
     const originalRules = f.host.rules;
     f.host.rules = () => ({ ...originalRules(), parties: [{ confirmed: true, members: ['a', 'b'] }] });
     await f.service.run();
-    f.chat.timeline.events.push({ id: 'secret', knownBy: ['a'], summary: '仅a知道秘密', npcIds: ['a'] },
-        { id: 'shared', knownBy: ['a', 'b'], summary: '共同知道', npcIds: ['a', 'b'] });
+    f.chat.timeline.events.push({ id: 'secret', knownBy: ['a'], summary: '仅a知道秘密', npcIds: ['a'], locationId: 'home' },
+        { id: 'shared', knownBy: ['a', 'b'], summary: '共同知道', npcIds: ['a', 'b'], locationId: 'home' });
     f.respond(task => task === 'analysis' ? analysis() : { plans: [] });
     f.add(); await f.service.run(); f.add(); await f.service.run();
     const prompts = f.calls.filter(call => call.task === 'simulation').map(call => call.prompt);
@@ -303,4 +303,143 @@ test('snapshot是独立副本且源码没有宿主正文直接写入或生成API
     assert.equal(f.chat.timeline.sourceCursor, 1);
     const code = await readFile(new URL('../world-service.js', import.meta.url), 'utf8');
     assert.ok(!/host\.context\s*\(|generateRaw|sendRequest\s*\(|\.extra\s*=|ctx\.chat\s*=/.test(code));
+});
+
+test('分析规划名单均过滤非人物和merged来源，宿主旧rules不能覆盖catalog分类', async () => {
+    for (const catalogOverride of [false, true]) {
+        const f = fixture({ npcs: ['org', 'unknown', 'merged', 'archived', 'ignored', 'untracked', 'a'] });
+        const patches = { org: { entityType: 'organization' }, unknown: { entityType: 'unknown' },
+            merged: { entityType: 'person', mergedInto: 'a' }, archived: { archived: true }, ignored: { ignored: true }, untracked: { tracked: false } };
+        const originalRules = f.host.rules;
+        if (catalogOverride) f.world.catalog = { npcs: originalRules().npcs.map(npc => ({ ...npc, ...patches[npc.id] })) };
+        else f.host.rules = () => { const rules = originalRules(); return { ...rules, npcs: rules.npcs.map(npc => ({ ...npc, ...patches[npc.id] })) }; };
+        await f.service.run(); f.add();
+        f.respond(task => task === 'analysis' ? analysis() : { plans: ['org', 'unknown', 'merged', 'a'].map(plan) });
+        await f.service.run();
+        assert.deepEqual(f.calls[0].prompt.npcs.map(npc => npc.id), ['a']);
+        assert.deepEqual(f.calls[1].prompt.characters.map(item => item.npc.id), ['a']);
+        assert.deepEqual(f.chat.timeline.plans.map(item => item.npcIds), [['a']]);
+    }
+});
+
+test('世界旧计划含organization或merged来源整组blocked，不结算或重写历史状态', async () => {
+    for (const patch of [{ entityType: 'organization' }, { entityType: 'unknown' }, { entityType: 'person', mergedInto: 'b' }]) {
+        const f = fixture({ npcs: ['a', 'b'] });
+        await f.service.run(); f.add(); await f.service.run();
+        const originalRules = f.host.rules;
+        f.host.rules = () => { const rules = originalRules(); return { ...rules, npcs: rules.npcs.map(npc => npc.id === 'a' ? { ...npc, ...patch } : npc) }; };
+        const before = structuredClone(f.chat.npcStates);
+        f.add(); f.respond(task => task === 'analysis' ? analysis() : { plans: [] }); await f.service.run();
+        assert.equal(f.chat.timeline.plans[0].status, 'blocked');
+        assert.equal(f.chat.timeline.plans[0].steps[0].remainingMinutes, 30);
+        assert.deepEqual(f.commits.at(-1).projections, []);
+        assert.deepEqual(f.chat.npcStates, before);
+        assert.deepEqual(f.chat.timeline.events, []);
+    }
+});
+
+test('世界请求排队前及两阶段响应后的资格变化均拒绝旧结果', async () => {
+    for (const phase of ['queued', 'analysis', 'simulation']) {
+        for (const patch of [{ entityType: 'organization' }, { entityType: 'unknown' }, { mergedInto: 'canonical' }, { canonicalId: 'canonical' }]) {
+            const f = fixture(), gate = deferred(), started = deferred();
+            f.world.catalog = { npcs: f.host.rules().npcs };
+            await f.service.run(); f.add();
+            let checkQueued;
+            if (phase === 'queued') f.host.request = async (_system, _prompt, _task, checkCurrent) => { checkQueued = checkCurrent; started.resolve(); return gate.promise; };
+            else f.respond(task => {
+                if (task === phase) { started.resolve(); return gate.promise; }
+                return analysis();
+            });
+            const running = f.service.run();
+            await started.promise;
+            Object.assign(f.world.catalog.npcs[0], patch);
+            if (phase === 'queued') assert.throws(checkQueued, /旧结果/);
+            gate.resolve(phase === 'simulation' ? { plans: [plan()] } : analysis());
+            await assert.rejects(running, /旧结果/);
+            assert.equal(f.commits.length, 0);
+            assert.equal(f.chat.timeline.sourceCursor, 1);
+        }
+    }
+});
+
+test('非person同行成员阻止拆组规划，合并不能把private事件交给canonical目标', async () => {
+    const f = fixture({ npcs: ['a', 'old', 'solo'] }), originalRules = f.host.rules;
+    f.host.rules = () => { const rules = originalRules(); return { ...rules,
+        npcs: rules.npcs.map(npc => npc.id === 'old' ? { ...npc, mergedInto: 'solo' } : npc),
+        parties: [{ confirmed: true, members: ['a', 'old'] }] }; };
+    await f.service.run();
+    f.chat.timeline.events.push({ id: 'secret', knownBy: ['old'], npcIds: ['old'], summary: '合并前私密信息' });
+    f.add(); f.respond(task => task === 'analysis' ? analysis() : { plans: [plan('solo')] });
+    await f.service.run();
+    assert.deepEqual(f.calls[1].prompt.characters.map(item => item.npc.id), ['solo']);
+    assert.deepEqual(f.calls[1].prompt.characters[0].knownEvents, []);
+    assert.ok(!JSON.stringify(f.calls[1].prompt).includes('合并前私密信息'));
+});
+
+test('空人物名单只分析时间不规划，旧v2和显式person仍能规划', async () => {
+    for (const entityType of ['organization', undefined, 'person']) {
+        const f = fixture(), originalRules = f.host.rules;
+        f.host.rules = () => { const rules = originalRules(); return { ...rules, npcs: rules.npcs.map(npc => ({ ...npc, ...(entityType ? { entityType } : {}) })) }; };
+        await f.service.run(); f.add(); await f.service.run();
+        assert.equal(f.calls.length, entityType === 'organization' ? 1 : 2);
+        assert.equal(f.chat.timeline.plans.length, entityType === 'organization' ? 0 : 1);
+    }
+});
+
+test('beta5: catalog cannot inherit legacy confirmation; canonical and redirect sources are excluded', async () => {
+    for (const patch of [{ confirmed: false, tracked: false }, { canonicalId: 'b' }, { entityType: null }, { redirect: true }, { rawLegacy: true }]) {
+        const f = fixture({ npcs: ['a', 'b'] });
+        f.world.catalog = { npcs: f.host.rules().npcs.map(npc => ({ ...npc })) };
+        Object.assign(f.world.catalog.npcs[0], patch);
+        if (patch.rawLegacy) f.world.catalog.npcs[0] = { id: 'a', name: 'a' };
+        if (patch.redirect) f.world.catalog.entityRedirects = { a: 'b' };
+        await f.service.run(); f.add();
+        f.respond(task => task === 'analysis' ? analysis() : { plans: [plan('a'), plan('b')] });
+        const before = structuredClone(f.chat.npcStates);
+        await f.service.run();
+        assert.deepEqual(f.calls[0].prompt.npcs.map(npc => npc.id), ['b']);
+        assert.deepEqual(f.calls[1].prompt.characters.map(item => item.npc.id), ['b']);
+        assert.deepEqual(f.chat.timeline.plans.map(item => item.npcIds), [['b']]);
+        assert.deepEqual(f.chat.npcStates, before); assert.deepEqual(f.chat.timeline.events, []);
+    }
+});
+
+test('beta5: planning evidence rejects invalid refs and never transfers source secrets', async () => {
+    const f = fixture({ npcs: ['a', 'old', 'org'] });
+    f.world.catalog = { npcs: f.host.rules().npcs.map(npc => ({ ...npc, entityType: npc.id === 'org' ? 'organization' : 'person' })), entityRedirects: { old: 'a' } };
+    await f.service.run();
+    const safe = { id: 'safe', knownBy: ['a'], npcIds: ['a'], locationId: 'home', summary: '有效事件' };
+    f.chat.timeline.events.push(safe,
+        { ...safe, id: 'source', knownBy: ['old'], npcIds: ['old'], summary: 'SECRET_source' },
+        { ...safe, id: 'org', npcIds: ['a', 'org'], summary: 'SECRET_org' },
+        { ...safe, id: 'missing', npcIds: ['missing'], summary: 'SECRET_missing' },
+        { ...safe, id: 'knower', knownBy: ['a', 'old'], summary: 'SECRET_knower' },
+        { ...safe, id: 'place', locationId: 'missing', summary: 'SECRET_place' });
+    const history = structuredClone(f.chat.timeline.events);
+    f.add(); f.respond(task => task === 'analysis' ? analysis() : { plans: [{ ...plan('a'), knownEventIds: ['org'] }, plan('old'), plan('a')] });
+    await f.service.run();
+    assert.deepEqual(f.calls[1].prompt.characters[0].knownEvents.map(event => event.id), ['safe']);
+    assert.ok(!JSON.stringify(f.calls[1].prompt).includes('SECRET'));
+    assert.deepEqual(f.chat.timeline.events, history);
+    assert.deepEqual(f.chat.timeline.plans.map(item => item.npcIds), [['a']]);
+});
+
+test('beta5: canonical and redirect changes invalidate queued responses and pending confirmation', async () => {
+    for (const patch of [{ canonicalId: 'other' }, { redirect: true }]) {
+        const f = fixture(), gate = deferred();
+        f.world.catalog = { npcs: f.host.rules().npcs };
+        await f.service.run(); f.add();
+        let checkQueued;
+        f.host.request = async (_s, _p, _t, check) => { checkQueued = check; return gate.promise; };
+        const running = f.service.run();
+        if (patch.redirect) f.world.catalog.entityRedirects = { a: 'other' };
+        else Object.assign(f.world.catalog.npcs[0], patch);
+        assert.throws(checkQueued, /旧结果/); gate.resolve(analysis());
+        await assert.rejects(running, /旧结果/); assert.equal(f.commits.length, 0);
+    }
+    const f = fixture(); f.world.catalog = { npcs: f.host.rules().npcs };
+    await f.service.run(); f.add('片刻'); f.respond(() => analysis('片刻', 0)); await f.service.run();
+    f.world.catalog.npcs[0].canonicalId = 'other';
+    await assert.rejects(f.service.confirmTime(10), /已变化/);
+    assert.equal(f.calls.length, 1); assert.equal(f.commits.length, 0);
 });

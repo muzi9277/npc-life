@@ -184,14 +184,16 @@ test('副连接测试等待或发送期间切换身份均丢弃结果，队列�
 });
 
 for (const kind of ['diary', 'chat']) {
-    for (const flag of ['archived', 'ignored']) {
+    for (const flag of ['archived', 'ignored', 'organization', 'unknown', 'mergedInto', 'canonicalId']) {
         test(`${kind}: ${flag} 在调用前、排队中、响应前均阻止生成和保存，保留历史`, async t => {
             for (const phase of ['before', 'queued', 'inflight']) await t.test(phase, async () => {
                 const f = fixture(), gate = deferred(), started = deferred();
                 const oldDiaries = structuredClone(f.state.chat.diaries);
                 const oldConversations = structuredClone(f.state.chat.conversations);
                 let blocker;
-                if (phase === 'before') f.state.world.catalog.npcs[0][flag] = true;
+                const patch = ['organization', 'unknown'].includes(flag) ? { entityType: flag }
+                    : { [flag]: ['mergedInto', 'canonicalId'].includes(flag) ? 'npc:canonical' : true };
+                if (phase === 'before') Object.assign(f.state.world.catalog.npcs[0], patch);
                 else {
                     f.context.generateRaw = async options => {
                         f.calls.main.push(options); started.resolve(); return gate.promise;
@@ -204,7 +206,7 @@ for (const kind of ['diary', 'chat']) {
                 const rejected = assert.rejects(generate(f.features, kind), /归档或忽略/);
                 if (phase === 'inflight') await started.promise;
                 // 替换目录对象，验证检查的是当前 catalog，不能只检查旧 npc 引用。
-                f.state.world.catalog.npcs[0] = { ...f.state.world.catalog.npcs[0], [flag]: true };
+                f.state.world.catalog.npcs[0] = { ...f.state.world.catalog.npcs[0], ...patch };
                 gate.resolve('不得保存的新内容');
                 if (blocker) await blocker;
                 await rejected;
@@ -270,7 +272,7 @@ test('profiles 空列表是成功提示，服务缺失/异常单独报告且不�
 });
 
 test('自动札记空名单、关闭、取消或空正文不请求不保存', async t => {
-    for (const mode of ['disabled', 'empty', 'untracked', 'unconfirmed', 'archived', 'ignored', 'cancelled', 'noText']) {
+    for (const mode of ['disabled', 'empty', 'untracked', 'unconfirmed', 'archived', 'ignored', 'organization', 'unknown', 'mergedInto', 'canonicalId', 'redirect', 'cancelled', 'noText']) {
         await t.test(mode, async () => {
             const f = fixture({ autoEnabled: mode !== 'disabled' });
             const npc = f.state.world.catalog.npcs[0];
@@ -278,6 +280,10 @@ test('自动札记空名单、关闭、取消或空正文不请求不保存', as
             if (mode === 'untracked') npc.tracked = false;
             if (mode === 'unconfirmed') npc.confirmed = false;
             if (['archived', 'ignored'].includes(mode)) npc[mode] = true;
+            if (['organization', 'unknown'].includes(mode)) npc.entityType = mode;
+            if (mode === 'mergedInto') npc.mergedInto = 'npc:canonical';
+            if (mode === 'canonicalId') npc.canonicalId = 'npc:canonical';
+            if (mode === 'redirect') f.state.world.catalog.entityRedirects = { 'npc:1': 'npc:canonical' };
             if (mode === 'noText') f.setTranscript('  ');
             const result = await f.features.generateAutomaticNotes({ isCurrent: () => mode !== 'cancelled' });
             assert.equal(result.generated, 0);
@@ -368,7 +374,7 @@ test('分析和侧写响应严格过滤名单、kind、重复和1000字上限；
 
 test('自动任务在排队发送前及两阶段响应后丢弃旧身份/正文/状态/关闭/资格变化/取消', async t => {
     for (const phase of ['queued', 'analysis', 'simulation', 'simulationQueued']) {
-        for (const mutation of ['identity', 'signature', 'revision', 'disabled', 'archived', 'ignored', 'tracked', 'confirmed', 'chat', 'world', 'isCurrent', 'destroy']) {
+        for (const mutation of ['identity', 'signature', 'revision', 'disabled', 'archived', 'ignored', 'organization', 'unknown', 'mergedInto', 'canonicalId', 'redirect', 'tracked', 'confirmed', 'chat', 'world', 'isCurrent', 'destroy']) {
             await t.test(`${phase}:${mutation}`, async () => {
                 const f = fixture({ autoEnabled: true }), gate = deferred(), started = deferred();
                 f.state.chat.npcStates['npc:1'].scene = 'present';
@@ -397,6 +403,10 @@ test('自动任务在排队发送前及两阶段响应后丢弃旧身份/正文/
                 if (mutation === 'revision') f.state.chat.stateRevision++;
                 if (mutation === 'disabled') f.state.store.preferences.autoEnabled = false;
                 if (mutation === 'archived' || mutation === 'ignored') f.state.world.catalog.npcs[0] = { ...f.state.world.catalog.npcs[0], [mutation]: true };
+                if (mutation === 'organization' || mutation === 'unknown') f.state.world.catalog.npcs[0].entityType = mutation;
+                if (mutation === 'mergedInto') f.state.world.catalog.npcs[0].mergedInto = 'npc:canonical';
+                if (mutation === 'canonicalId') f.state.world.catalog.npcs[0].canonicalId = 'npc:canonical';
+                if (mutation === 'redirect') f.state.world.catalog.entityRedirects = { 'npc:1': 'npc:canonical' };
                 if (mutation === 'tracked' || mutation === 'confirmed') f.state.world.catalog.npcs[0][mutation] = false;
                 if (mutation === 'chat') f.state.chat = structuredClone(f.state.chat);
                 if (mutation === 'world') f.state.world = structuredClone(f.state.world);
@@ -450,7 +460,7 @@ test('snapshot 分离活跃/归档/忽略 NPC，保留全部原字段及可读�
     const f = fixture();
     const before = f.features.snapshot();
     f.state.world.catalog.npcs.push(
-        { id: 'npc:archived', name: '归档联系人', archived: true, ignored: false, archivedAt: 123 },
+        { id: 'npc:archived', name: '归档联系人', confirmed: true, tracked: true, archived: true, ignored: false, archivedAt: 123 },
         { id: 'npc:ignored', name: '忽略联系人', ignored: true, tracked: true },
     );
     const snapshot = f.features.snapshot();
@@ -463,7 +473,7 @@ test('snapshot 分离活跃/归档/忽略 NPC，保留全部原字段及可读�
     assert.deepEqual(Object.keys(snapshot).sort(), [
         'identity', 'worldLabel', 'day', 'playerName', 'npcs', 'archivedNpcs', 'locations', 'routes',
         'events', 'diaries', 'conversations', 'preferences', 'profiles', 'profileError', 'profileMessage', 'serviceError',
-        'memory', 'mapImage', 'busy', 'autoNotes', 'automation', 'timeline',
+        'memory', 'mapImage', 'busy', 'autoNotes', 'automation', 'timeline', 'organizations', 'identityCandidates', 'identityMerges',
     ].sort());
     f.state.world.catalog.npcs[0].archived = true;
     const archived = f.features.snapshot();
@@ -474,4 +484,147 @@ test('snapshot 分离活跃/归档/忽略 NPC，保留全部原字段及可读�
     assert.equal(archived.archivedNpcs[0].locked, true);
     assert.deepEqual(archived.diaries, before.diaries);
     assert.deepEqual(archived.conversations, before.conversations);
+});
+
+test('snapshot 只列 canonical 人物，组织候选合并资料独立，历史所有权不改写', () => {
+    const f = fixture();
+    Object.assign(f.state.world.catalog, {
+        organizations: [{ id: 'org:guild', name: '商会', description: '组织资料' }],
+        identityCandidates: [{ id: 'candidate', name: '待确认', entityType: 'unknown' }],
+        identityMerges: [{ id: 'merge', fromId: 'npc:old', toId: 'npc:1', status: 'active' }],
+    });
+    f.state.world.catalog.npcs.push(
+        { id: 'npc:old', name: '旧名', entityType: 'person', mergedInto: 'npc:1', tracked: true, confirmed: true },
+        { id: 'npc:older', name: '更旧名', confirmed: true, tracked: true, mergedInto: 'npc:old' },
+        { id: 'npc:org', name: '商会', entityType: 'organization', tracked: true, confirmed: true },
+        { id: 'npc:unknown', name: '候选', entityType: 'unknown', tracked: true, confirmed: true },
+    );
+    f.state.chat.events.push({ id: 'history', npcIds: ['npc:old', 'npc:1'], summary: '原始历史' });
+    f.state.chat.diaries.push({ id: 'old-diary', npcId: 'npc:older', text: '旧日记' });
+    f.state.chat.autoNotes = [{ id: 'old-note', npcId: 'npc:old', text: '旧侧写' }];
+    f.state.chat.conversations['npc:old'] = [{ role: 'assistant', content: '旧会话' }];
+    const before = structuredClone(f.state);
+    const snapshot = f.features.snapshot();
+    assert.deepEqual(snapshot.npcs.map(npc => npc.id), ['npc:1']);
+    assert.deepEqual(snapshot.archivedNpcs, []);
+    for (const key of ['organizations', 'identityCandidates', 'identityMerges']) {
+        assert.deepEqual(snapshot[key], before.world.catalog[key]);
+        snapshot[key][0].name = '展示修改';
+    }
+    assert.deepEqual(snapshot.events.at(-1), { ...before.chat.events.at(-1), canonicalNpcIds: ['npc:1'] });
+    assert.deepEqual(snapshot.diaries.at(-1), { ...before.chat.diaries.at(-1), canonicalNpcId: 'npc:1' });
+    assert.deepEqual(snapshot.autoNotes[0], { ...before.chat.autoNotes[0], canonicalNpcId: 'npc:1' });
+    assert.deepEqual(snapshot.diaries[0], before.chat.diaries[0]);
+    assert.deepEqual(snapshot.conversations, before.chat.conversations);
+    snapshot.diaries.at(-1).text = '展示修改';
+    snapshot.events.at(-1).npcIds.push('new');
+    snapshot.autoNotes[0].text = '展示修改';
+    assert.deepEqual(f.state, before);
+    assert.equal(f.saved(), 0);
+});
+
+test('snapshot 不解析合并循环、丢失目标、非人物或非活跃目标，撤销合并即时恢复原形', () => {
+    for (const patch of [{ entityType: 'organization' }, { entityType: 'unknown' }, { archived: true }, { ignored: true }, { mergedInto: 'npc:old' }]) {
+        const f = fixture();
+        Object.assign(f.state.world.catalog.npcs[0], patch);
+        f.state.world.catalog.npcs.push(
+            { id: 'npc:old', confirmed: true, tracked: true, mergedInto: 'npc:1' },
+            { id: 'npc:missing', confirmed: true, tracked: true, mergedInto: 'missing' });
+        f.state.chat.diaries = [{ npcId: 'npc:old', text: '历史' }, { npcId: 'npc:missing', text: '丢失目标' }];
+        assert.deepEqual(f.features.snapshot().diaries, f.state.chat.diaries);
+    }
+    const f = fixture();
+    const source = { id: 'npc:old', entityType: 'person', mergedInto: 'npc:1' };
+    f.state.world.catalog.npcs.push(source);
+    f.state.chat.diaries = [{ npcId: 'npc:old', text: '历史' }];
+    assert.equal(f.features.snapshot().diaries[0].canonicalNpcId, 'npc:1');
+    delete source.mergedInto;
+    assert.deepEqual(f.features.snapshot().diaries, f.state.chat.diaries);
+    assert.deepEqual(f.features.snapshot().npcs.map(npc => npc.id), ['npc:1', 'npc:old']);
+});
+
+test('显式 person 和旧v2无类型人物均可生成及自动侧写，未知实体不会混入名单', async () => {
+    for (const explicit of [false, true]) {
+        const f = fixture({ autoEnabled: true });
+        if (explicit) f.state.world.catalog.npcs[0].entityType = 'person';
+        f.state.world.catalog.npcs.push({ id: 'org', entityType: 'organization', tracked: true, confirmed: true });
+        f.state.chat.npcStates['npc:1'].scene = 'present';
+        await f.features.generateDiary('npc:1', 2, 100);
+        await f.features.sendChat('npc:1', '你好');
+        automaticResponses(f, [], [noteRow('gesture')]);
+        assert.deepEqual(await f.features.generateAutomaticNotes(), { generated: 1, skipped: 0 });
+        const roster = JSON.parse(f.calls.main.at(-2).prompt.split('\n')[0].split('：')[1]);
+        assert.deepEqual(roster.map(npc => npc.npcId), ['npc:1']);
+    }
+});
+
+test('beta5: strict legacy eligibility, aliases and redirect sources never own target conversations', async () => {
+    for (const patch of [{ confirmed: false, tracked: false }, { canonicalId: 'npc:target' }, { entityType: null }, { redirect: true }]) {
+        const f = fixture();
+        Object.assign(f.state.world.catalog.npcs[0], patch);
+        if (patch.redirect) f.state.world.catalog.entityRedirects = { 'npc:1': 'npc:target' };
+        f.state.world.catalog.npcs.push({ id: 'npc:target', name: '规范人物', entityType: 'person', aliases: ['阿青'], tracked: true, confirmed: true });
+        f.state.chat.conversations['npc:target'] = [{ role: 'assistant', content: '目标秘密' }];
+        const before = structuredClone(f.state);
+        await assert.rejects(f.features.generateDiary('npc:1', 2, 100), /并非人物/);
+        await assert.rejects(f.features.sendChat('npc:1', '你好'), /并非人物/);
+        assert.equal(f.calls.main.length + f.calls.secondary.length, 0);
+        assert.deepEqual(f.state, before);
+        assert.equal(f.saved(), 0);
+        assert.deepEqual(f.features.snapshot().npcs.map(npc => npc.id), ['npc:target']);
+        assert.deepEqual(f.features.snapshot().npcs[0].aliases, ['阿青']);
+    }
+    for (const patch of [{ tracked: true, confirmed: false }, { tracked: false, confirmed: true }, { entityType: 'person', tracked: false, confirmed: false }]) {
+        const f = fixture(); Object.assign(f.state.world.catalog.npcs[0], patch);
+        await f.features.sendChat('npc:1', '你好');
+        assert.equal(f.calls.main.length, 1);
+    }
+});
+
+test('beta5: redirect display fields require complete person chain and valid event references', () => {
+    const f = fixture();
+    Object.assign(f.state.world.catalog.npcs[0], { entityType: 'person', aliases: ['旧名'] });
+    f.state.world.catalog.npcs.push(
+        { id: 'old', entityType: 'person', canonicalId: 'npc:1' },
+        { id: 'redirect', entityType: 'person' },
+        { id: 'org', entityType: 'organization' },
+        { id: 'unknown', entityType: 'unknown' },
+        { id: 'archive', entityType: 'person', archived: true },
+        { id: 'cycle', entityType: 'person' },
+        { id: 'broken', entityType: 'person' },
+        { id: 'bad-category', entityType: 'person' },
+    );
+    f.state.world.catalog.entityRedirects = { old: 'npc:1', redirect: 'old', cycle: 'cycle', broken: 'missing', 'bad-category': 'org' };
+    f.state.chat.diaries = ['old', 'redirect', 'org', 'unknown', 'archive', 'cycle', 'broken', 'bad-category'].map(npcId => ({ npcId, text: npcId }));
+    f.state.chat.autoNotes = structuredClone(f.state.chat.diaries);
+    f.state.chat.events = [{ npcIds: ['old', 'npc:1'], summary: 'safe' }, { npcIds: ['redirect', 'missing'], summary: 'unsafe' }];
+    const before = structuredClone(f.state), snapshot = f.features.snapshot();
+    assert.deepEqual(snapshot.npcs.map(npc => npc.id), ['npc:1']);
+    assert.deepEqual(snapshot.archivedNpcs.map(npc => npc.id), ['archive']);
+    assert.deepEqual(snapshot.events[0].canonicalNpcIds, ['npc:1']);
+    assert.equal(snapshot.events[1].canonicalNpcIds, undefined);
+    for (const rows of [snapshot.diaries, snapshot.autoNotes]) {
+        assert.deepEqual(rows.slice(0, 2).map(row => row.canonicalNpcId), ['npc:1', 'npc:1']);
+        assert.ok(rows.slice(2).every(row => row.canonicalNpcId === undefined));
+    }
+    snapshot.conversations['npc:1'][0].content = '展示更改';
+    assert.deepEqual(f.state, before);
+    assert.equal(f.saved(), 0);
+});
+
+test('beta5: final payload and profile response guards reject changes without saving', async () => {
+    for (const kind of ['diary', 'chat']) {
+        const f = fixture({ routes: { narrative: 'secondary', chat: 'secondary' } });
+        f.service.constructPrompt = messages => { f.state.world.catalog.npcs[0].canonicalId = 'other'; return messages; };
+        const before = structuredClone(f.state.chat);
+        await assert.rejects(generate(f.features, kind), /并非人物/);
+        assert.equal(f.calls.secondary.length, 0);
+        assert.deepEqual(f.state.chat, before);
+        assert.equal(f.saved(), 0);
+    }
+    const f = fixture(), gate = deferred(), started = deferred();
+    f.service.sendRequest = async () => { started.resolve(); return gate.promise; };
+    const rejected = assert.rejects(f.features.testSecondaryProfile('secondary:1'), /已变化/);
+    await started.promise; f.state.store.preferences.secondaryProfileId = 'secondary:2'; gate.resolve('OK');
+    await rejected; assert.equal(f.saved(), 0);
 });

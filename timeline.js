@@ -2,9 +2,20 @@
 const copy = value => structuredClone(value);
 const text = value => typeof value === 'string' ? value.trim().slice(0, 160) : '';
 const open = plan => plan.status === 'active' || plan.status === 'blocked';
-const enabledNpc = npc => npc?.tracked === true && npc.confirmed === true && !npc.archived && !npc.ignored;
+const person = npc => !!npc && (npc.entityType === 'person'
+    || (npc.entityType === undefined && (npc.confirmed === true || npc.tracked === true)));
+const enabledNpc = npc => person(npc) && npc.tracked === true && npc.confirmed === true
+    && !npc.archived && !npc.ignored && !npc.mergedInto
+    && (npc.canonicalId === undefined || npc.canonicalId === npc.id);
+const eligibleId = (rules, id) => typeof id === 'string'
+    && !Object.prototype.hasOwnProperty.call(rules.entityRedirects || {}, id)
+    && enabledNpc(rules.npcs?.find(npc => npc.id === id));
 const knownLocation = (rules, id) => id && id !== 'unknown'
-    && rules.locations.some(location => location.id === id && location.confirmed === true);
+    && rules.locations?.some(location => location.id === id && location.confirmed === true);
+// 事件参与者和知情者都必须仍是有效实体；历史引用不借合并重定向扩大知情范围。
+const validEvent = (event, rules) => Array.isArray(event?.npcIds) && event.npcIds.length > 0
+    && event.npcIds.every(id => eligibleId(rules, id)) && knownLocation(rules, event.locationId)
+    && Array.isArray(event.knownBy) && event.knownBy.every(id => id === 'player' || eligibleId(rules, id));
 const locked = state => state.locked === true || state.activityLock?.active === true || state.mobility === 'immobile';
 const externalTravel = state => ['in_transit', 'arrival_ready'].includes(state.travel?.status)
     || state.status === 'in_transit';
@@ -26,7 +37,7 @@ function snapshot(timeline) {
 
 // 同行闭包必须完整，成员必须启用、确认并处于同一已知地点。
 function memberProblem(ids, rules, states) {
-    if (!ids.length) return '没有有效 NPC';
+    if (!Array.isArray(ids) || !ids.length || ids.some(id => typeof id !== 'string' || !id)) return '没有有效 NPC';
     const included = new Set(ids);
     for (const party of rules.parties) {
         if (party.confirmed === false) continue;
@@ -34,8 +45,7 @@ function memberProblem(ids, rules, states) {
         if (members.some(id => included.has(id)) && members.some(id => !included.has(id))) return '同行成员不完整';
     }
     for (const id of ids) {
-        const npc = rules.npcs.find(item => item.id === id);
-        if (!enabledNpc(npc)) return 'NPC 未启用或未确认';
+        if (!eligibleId(rules, id)) return 'NPC 未启用或未确认';
         if (!states[id] || !knownLocation(rules, states[id].locationId)) return 'NPC 当前地点未知';
         if (externalTravel(states[id])) return 'NPC 正在外部行程中';
     }
@@ -75,10 +85,12 @@ function validatePlan(plan, rules, states) {
 }
 
 // 接收计划只挑选引擎认识的字段，不信任模型的 status、ID、剩余耗时或事件文本。
-function normalizePlan(raw, turnId, index, events) {
-    const npcIds = Array.isArray(raw?.npcIds) ? [...new Set(raw.npcIds.filter(id => typeof id === 'string' && id))] : [];
+function normalizePlan(raw, turnId, index, events, rules) {
+    // 保留非法成员供整组校验拒绝，不能删除坏引用后让其余成员执行。
+    const npcIds = Array.isArray(raw?.npcIds) ? [...new Set(raw.npcIds)] : [];
     const id = `${turnId}:plan:${index}`;
-    const validCauses = new Set(events.filter(event => npcIds.length && npcIds.every(npcId => event.knownBy?.includes(npcId))).map(event => event.id));
+    const validCauses = new Set(events.filter(event => validEvent(event, rules)
+        && npcIds.length && npcIds.every(npcId => event.knownBy.includes(npcId))).map(event => event.id));
     const steps = Array.isArray(raw?.steps) ? raw.steps.slice(0, 3).map((step, stepIndex) => ({
         id: `${id}:step:${stepIndex}`, kind: step.kind, locationId: step.locationId,
         targetLocationId: step.kind === 'travel' ? step.targetLocationId : null,
@@ -98,8 +110,8 @@ function completionEvent(timeline, plan, step, rules, states, turnId, clockMinut
     const knownBy = [...plan.npcIds];
     if (knownLocation(rules, rules.player.locationId) && rules.player.locationId === locationId
         && plan.npcIds.some(id => states[id].scene === 'present' && states[id].locationId === locationId)) knownBy.push('player');
-    const causeIds = plan.knownEventIds.filter(id => timeline.events.some(event => event.id === id
-        && plan.npcIds.every(npcId => event.knownBy?.includes(npcId))));
+    const causeIds = (plan.knownEventIds || []).filter(id => timeline.events.some(event => event.id === id
+        && validEvent(event, rules) && plan.npcIds.every(npcId => event.knownBy.includes(npcId))));
     const place = rules.locations.find(location => location.id === locationId);
     return { id: `${turnId}:event:${timeline.events.length}`, turnId, planId: plan.id, stepId: step.id,
         kind: step.kind, npcIds: [...plan.npcIds], locationId, clockMinutes, knownBy, causeIds,
@@ -167,7 +179,7 @@ export function proposeTurn(timeline, input, rules) {
     for (const plan of next.plans) if (open(plan)) advancePlan(next, plan, delta, safeRules, states, projections, input.id);
     next.clockMinutes += delta;
     for (const [index, raw] of (input.plans || []).entries()) {
-        const plan = normalizePlan(raw, input.id, index, next.events);
+        const plan = normalizePlan(raw, input.id, index, next.events, safeRules);
         // 即使旧计划 blocked，也不能未经反馈擅自替换同一成员的计划。
         if (next.plans.some(existing => open(existing) && existing.npcIds.some(id => plan.npcIds.includes(id)))) continue;
         const problem = !plan.steps.length ? '计划没有步骤' : validatePlan(plan, safeRules, states);
@@ -201,9 +213,7 @@ export function timelineContext(timeline, rules, budget = 1200) {
     const safeRules = { npcs: [], locations: [], states: {}, player: {}, ...rules };
     if (!knownLocation(safeRules, safeRules.player.locationId)) return '';
     // 整条事件可能提及多名参与者：任一成员已归档、忽略或停用，均不再注入旧结果。
-    const events = timeline.events.filter(event => event.knownBy?.includes('player')
-        && Array.isArray(event.npcIds) && event.npcIds.length > 0
-        && event.npcIds.every(id => enabledNpc(safeRules.npcs.find(npc => npc.id === id)))
+    const events = timeline.events.filter(event => validEvent(event, safeRules) && event.knownBy.includes('player')
         && event.locationId === safeRules.player.locationId
         && event.npcIds.some(id => safeRules.states[id]?.scene === 'present'
             && safeRules.states[id]?.locationId === event.locationId)).slice(-3);
