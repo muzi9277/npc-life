@@ -1,10 +1,11 @@
-/* NPC Life 3.0.0-beta.2：手机式控制台只是管理界面，不是剧情中的手机。 */
+/* NPC Life 3.0.0-beta.3：手机式控制台只是管理界面，不是剧情中的手机。 */
 // 已核对 ST 1.17.0 public/script.js 的真实枚举导出和深度注入签名。
-import { extension_prompt_types, extension_prompt_roles } from '../../../../script.js';
+import { extension_prompt_types, extension_prompt_roles, isGenerating } from '../../../../script.js';
 import { mountConsole } from './console.js';
 import { createConsoleFeatures, normalizeConsolePreferences } from './services.js';
+import { createAutomationScheduler } from './automation.js';
 
-const RELEASE_VERSION = '3.0.0-beta.2';
+const RELEASE_VERSION = '3.0.0-beta.3';
 
 const MODULE_NAME = 'npc-life';
 const ROOT = '#npc-life-settings';
@@ -33,6 +34,7 @@ let settingsHostElement = null;
 let settingsHostWasInert = false;
 let consoleView = null;
 let consoleFeatures = null;
+let automationScheduler = null;
 
 // 返回酒馆上下文，不缓存会随聊天变化的对象。
 function getCtx() {
@@ -1030,7 +1032,7 @@ function commitGameDay(world, chat, fromDay) {
 async function generateSceneGestures() {
     if (busy) return;
     const { world, chat } = activeData();
-    const presentNpcs = world.catalog.npcs.filter(npc => activeNpc(npc) && npc.confirmed && chat.npcStates[npc.id]?.scene === 'present');
+    const presentNpcs = world.catalog.npcs.filter(npc => activeNpc(npc) && npc.tracked && npc.confirmed && chat.npcStates[npc.id]?.scene === 'present');
     if (!presentNpcs.length) throw new Error('当前没有已确认在场的 NPC。先同步正文事实或确认 NPC 进入当前场景。');
     const userName = cleanText(activeData().store.preferences.userName || getCtx().name1 || '');
     const userReference = userName || '主角';
@@ -1796,8 +1798,34 @@ function initializeConsoleFeatures() {
         data: activeData, context: getCtx, identity: () => worldId() + '|' + chatId(),
         memoryApi: () => window.stMemoryEnhancement, npcLore, locationName, id: newId,
         saveView: savePreferences, saveState: save, busy: () => busy,
+        transcript: () => recentChatText(10).slice(-6000),
+        messageSignature: chatFingerprint,
+        automationStatus: () => automationScheduler?.status(),
         confirm: value => window.confirm(value), refresh: () => consoleView?.render(),
     });
+}
+
+// 建立按主聊天新回复计数的调度器，后台侧写不调用推进游戏日的模拟入口。
+function initializeAutomation() {
+    automationScheduler = createAutomationScheduler({
+        context: getCtx, data: activeData, identity: () => worldId() + '|' + chatId(),
+        preferences: () => rootSettings().preferences,
+        isBusy: () => busy || consoleFeatures.busy() || isGenerating(),
+        run: options => consoleFeatures.generateAutomaticNotes(options),
+        setEnabled: enabled => { rootSettings().preferences.autoEnabled = enabled === true; savePreferences(); },
+        save: savePreferences, refresh: () => consoleView?.render(),
+    });
+}
+
+// 打开已核实的酒馆连接管理器所在抽屉，只导航而不切换或创建连接。
+function openConnectionManager() {
+    const panel = document.getElementById('rm_api_block');
+    const toggle = document.querySelector('#sys-settings-button > .drawer-toggle');
+    const profiles = document.getElementById('connection_profiles');
+    if (!panel || !toggle || !profiles) throw new Error('酒馆内置连接管理器未加载或已禁用。请在扩展管理启用 Connection Manager，再打开 API 连接面板。');
+    if (!panel.classList.contains('openDrawer')) toggle.click();
+    profiles.scrollIntoView?.({ block: 'nearest' });
+    profiles.focus();
 }
 
 // 装载手机式自由窗口并将原工作台整体搬入动态页，保留原事件委托。
@@ -1807,14 +1835,16 @@ function attachConsole() {
         generateDiary: (...args) => consoleFeatures.generateDiary(...args),
         sendChat: (...args) => consoleFeatures.sendChat(...args),
         clearChat: (...args) => consoleFeatures.clearChat(...args),
-        savePreferences: patch => consoleFeatures.savePreferences(patch),
+        savePreferences: patch => { consoleFeatures.savePreferences(patch); automationScheduler?.tick(); },
+        pauseAutomation: () => automationScheduler?.pause(),
+        resetAutomation: () => automationScheduler?.reset(),
         importMap: value => consoleFeatures.importMap(value),
         setMapImage: file => consoleFeatures.setMapImage(file),
         setLocationTags: (...args) => consoleFeatures.setLocationTags(...args),
         refreshMemory: () => consoleFeatures.memory(),
         testSecondaryProfile: id => consoleFeatures.testSecondaryProfile(id),
         archiveNpc, restoreNpc,
-        openConnectionManager: () => status('请使用酒馆内置 Connection Manager 编辑渠道。NPC Life 不保存 API 密钥。'),
+        openConnectionManager,
         getWorkbench: () => document.querySelector(ROOT),
         openWorkbench: () => consoleView?.open('dynamic'),
         exportData: exportJson, importData: importJson, notify: status,
@@ -1920,10 +1950,11 @@ function init() {
         addUI();
         attachConsole();
         checkIdentity();
+        initializeAutomation();
         render();
-        const onChange = () => { try { if (!checkIdentity()) { const { world, chat } = activeData(); if (revokeMissingCanonFacts(world, chat)) { save(); render(); } } } catch (error) { console.error('[NPC Life]', error); } };
+        const onChange = () => { try { if (!checkIdentity()) { const { world, chat } = activeData(); if (revokeMissingCanonFacts(world, chat)) { save(); render(); } } automationScheduler?.tick(); } catch (error) { console.error('[NPC Life]', error); } };
         pollTimer = setInterval(onChange, 700);
-        window.__npcLifeRpgCleanup = () => { clearInterval(pollTimer); revision++; try { setPrompt(''); } catch { /* 注入接口不可用时仍清理 UI */ } consoleFeatures?.destroy(); consoleView?.destroy(); consoleView = null; $(ROOT).off('.npcLife').remove(); $('#npc-life-extension-launcher').remove(); settingsGlobalCleanup?.(); settingsGlobalCleanup = null; };
+        window.__npcLifeRpgCleanup = () => { clearInterval(pollTimer); revision++; try { setPrompt(''); } catch { /* 注入接口不可用时仍清理 UI */ } automationScheduler?.destroy(); automationScheduler = null; consoleFeatures?.destroy(); consoleView?.destroy(); consoleView = null; $(ROOT).off('.npcLife').remove(); $('#npc-life-extension-launcher').remove(); settingsGlobalCleanup?.(); settingsGlobalCleanup = null; };
     } catch (error) {
         console.error('[NPC Life] 初始化失败', error);
         window.alert(`NPC Life 初始化失败：${error?.message ?? error}`);

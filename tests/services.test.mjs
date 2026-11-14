@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test, mock, after } from 'node:test';
-import { createConsoleFeatures } from '../services.js';
+import { createConsoleFeatures, normalizeConsolePreferences } from '../services.js';
 
 // 所有请求入口均由本地 host 替身提供；若误触 fetch，立即失败，禁止联网。
 mock.method(globalThis, 'fetch', () => { throw new Error('回归测试禁止联网'); });
@@ -13,7 +13,7 @@ function deferred() {
 }
 
 function fixture(preferences = {}) {
-    let identity = 'world:chat:1', saved = 0;
+    let identity = 'world:chat:1', saved = 0, transcript = '阿青正在庭院读书。阿青离开了玩家身边。', signature = '正文:1', nextId = 0;
     const calls = { main: [], secondary: [], constructed: [], memory: 0 };
     const state = {
         store: { preferences: {
@@ -27,7 +27,7 @@ function fixture(preferences = {}) {
             routes: [{ fromId: 'loc:1', toId: 'loc:2' }],
         } },
         chat: {
-            day: 2, npcStates: { 'npc:1': { locationId: 'loc:1', activity: '读书',
+            day: 2, stateRevision: 7, npcStates: { 'npc:1': { locationId: 'loc:1', activity: '读书',
                 relationship: { note: '朋友' }, activityLock: { active: true } } },
             events: [{ day: 2, npcIds: ['npc:1'], summary: '在庭院读书。' }],
             diaries: [{ id: 'old', npcId: 'npc:1', day: 1, text: '旧文章' }],
@@ -49,12 +49,25 @@ function fixture(preferences = {}) {
     const host = {
         data: () => state, identity: () => identity, context: () => context,
         refresh: () => {}, saveView: () => { saved++; }, busy: () => false,
-        npcLore: () => '本地角色设定', locationName: () => '庭院', id: () => 'new',
+        npcLore: () => '本地角色设定', locationName: () => '庭院', id: () => `new:${++nextId}`,
+        transcript: () => transcript, messageSignature: () => signature,
         memoryApi: () => { calls.memory++; return { ext_getAllTables: () => [{ name: '记忆', data: [['人', '事'], ['阿青', 'MEMORY_MARKER']] }] }; },
     };
-    return { features: createConsoleFeatures(host), state, context, service, calls,
-        switchIdentity: () => { identity = 'world:chat:2'; }, saved: () => saved };
+    return { features: createConsoleFeatures(host), host, state, context, service, calls,
+        switchIdentity: () => { identity = 'world:chat:2'; }, saved: () => saved,
+        setTranscript: value => { transcript = value; }, changeSignature: () => { signature = '正文:2'; } };
 }
+
+// 自动生成的模型输出完全来自本地 JSON 替身，可分别挂起分析和侧写阶段。
+function automaticResponses(f, scenes = [], notes = []) {
+    let request = 0;
+    f.context.generateRaw = async options => {
+        f.calls.main.push(options);
+        return JSON.stringify(++request === 1 ? { scenes } : { notes });
+    };
+}
+const sceneRow = (scene, evidence = '', npcId = 'npc:1') => ({ npcId, scene, evidence });
+const noteRow = (kind, value = '阿青在当前庭院安静读书。', npcId = 'npc:1') => ({ npcId, kind, text: value });
 
 const generate = (features, kind) => kind === 'diary'
     ? features.generateDiary('npc:1', 2, 300) : features.sendChat('npc:1', '你好');
@@ -221,6 +234,218 @@ for (const kind of ['diary', 'chat']) {
     });
 }
 
+test('自动偏好默认关闭、间隔默认5并限定为1..100整数，只保存白名单字段', () => {
+    const defaults = normalizeConsolePreferences();
+    assert.equal(defaults.autoEnabled, false);
+    assert.equal(defaults.autoEveryReplies, 5);
+    for (const [input, expected] of [[0, 1], [-20, 1], [1000, 100], [6.9, 6], ['8', 8], ['invalid', 5]]) {
+        assert.equal(normalizeConsolePreferences({ autoEveryReplies: input }).autoEveryReplies, expected);
+    }
+    assert.equal(normalizeConsolePreferences({ autoEnabled: 'true' }).autoEnabled, false);
+    const f = fixture();
+    f.features.savePreferences({ autoEnabled: true, autoEveryReplies: 9.9, apiKey: 'NEVER_SAVE' });
+    assert.equal(f.state.store.preferences.autoEnabled, true);
+    assert.equal(f.state.store.preferences.autoEveryReplies, 9);
+    assert.equal(f.state.store.preferences.apiKey, undefined);
+});
+
+test('profiles 空列表是成功提示，服务缺失/异常单独报告且不读取连接密钥', () => {
+    const f = fixture();
+    f.service.getSupportedProfiles = () => [];
+    const empty = f.features.profiles();
+    assert.equal(empty.profileError, '');
+    assert.equal(empty.serviceError, '');
+    assert.match(empty.profileMessage, /可用.*没有/);
+    const profile = { id: 'secondary:1', name: '公开名', model: '公开模型' };
+    for (const secret of ['apiKey', 'key', 'url', 'connection', 'secret']) {
+        Object.defineProperty(profile, secret, { enumerable: true, get() { assert.fail(`不应读取 ${secret}`); } });
+    }
+    f.service.getSupportedProfiles = () => [profile];
+    assert.deepEqual(f.features.profiles().profiles, [{ id: 'secondary:1', name: '公开名', model: '公开模型', preset: '' }]);
+    delete f.context.ConnectionManagerRequestService;
+    assert.match(f.features.profiles().serviceError, /未提供/);
+    f.context.ConnectionManagerRequestService = { getSupportedProfiles() { throw new Error('服务异常'); } };
+    assert.match(f.features.profiles().profileError, /服务异常/);
+    assert.equal(f.features.profiles().profileMessage, '');
+});
+
+test('自动札记空名单、关闭、取消或空正文不请求不保存', async t => {
+    for (const mode of ['disabled', 'empty', 'untracked', 'unconfirmed', 'archived', 'ignored', 'cancelled', 'noText']) {
+        await t.test(mode, async () => {
+            const f = fixture({ autoEnabled: mode !== 'disabled' });
+            const npc = f.state.world.catalog.npcs[0];
+            if (mode === 'empty') f.state.world.catalog.npcs = [];
+            if (mode === 'untracked') npc.tracked = false;
+            if (mode === 'unconfirmed') npc.confirmed = false;
+            if (['archived', 'ignored'].includes(mode)) npc[mode] = true;
+            if (mode === 'noText') f.setTranscript('  ');
+            const result = await f.features.generateAutomaticNotes({ isCurrent: () => mode !== 'cancelled' });
+            assert.equal(result.generated, 0);
+            assert.equal(f.calls.main.length + f.calls.secondary.length, 0);
+            assert.equal(f.saved(), 0);
+        });
+    }
+});
+
+test('自动场景保守fallback、原文证据和present/away/unknown类型边界', async t => {
+    const cases = [
+        { old: 'unknown', scene: 'present', evidence: '  阿青正在庭院读书。  ', kind: 'gesture', count: 1 },
+        { old: 'unknown', scene: 'present', evidence: '虚构证据', kind: 'gesture', count: 0 },
+        { old: 'unknown', scene: 'unknown', kind: 'gesture', count: 0 },
+        { old: 'unknown', scene: 'away', evidence: '没有提到阿青', kind: 'activity', count: 0 },
+        { old: 'unknown', scene: 'away', evidence: '阿青离开了玩家身边。', kind: 'activity', count: 1 },
+        { old: 'away', scene: 'unknown', kind: 'activity', count: 1 },
+        { old: 'present', scene: 'unknown', kind: 'psychology', count: 1 },
+        { old: 'present', scene: 'away', evidence: '没有提到阿青', kind: 'activity', count: 0 },
+        { old: 'present', scene: 'away', evidence: '阿青正在庭院读书。', kind: 'gesture', count: 1 },
+        { old: 'present', scene: 'away', evidence: '阿青离开了玩家身边。', kind: 'activity', count: 1 },
+        { old: 'present', scene: 'away', evidence: '阿青没有离开玩家身边。', kind: 'gesture', count: 1 },
+        { old: 'away', scene: 'unknown', kind: 'activity', location: 'unknown', count: 0 },
+        { old: 'away', scene: 'unknown', kind: 'gesture', count: 0 },
+        { old: 'present', scene: 'unknown', kind: 'activity', count: 0 },
+    ];
+    for (const scenario of cases) await t.test(JSON.stringify(scenario), async () => {
+        const f = fixture({ autoEnabled: true });
+        Object.assign(f.state.chat.npcStates['npc:1'], { scene: scenario.old, locationId: scenario.location || 'loc:1' });
+        f.setTranscript('阿青正在庭院读书。阿青离开了玩家身边。没有提到阿青。阿青没有离开玩家身边。');
+        const before = structuredClone(f.state.chat.npcStates);
+        automaticResponses(f, [sceneRow(scenario.scene, scenario.evidence)], [noteRow(scenario.kind)]);
+        const result = await f.features.generateAutomaticNotes({ sourceKey: 'reply:1' });
+        assert.deepEqual(result, { generated: scenario.count, skipped: 1 - scenario.count });
+        assert.deepEqual(f.state.chat.npcStates, before);
+        if (scenario.count) {
+            assert.equal(f.state.chat.autoNotes[0].sourceKey, 'reply:1');
+            assert.equal(f.state.chat.autoNotes[0].npcName, '阿青');
+            assert.equal(f.state.chat.autoNotes[0].backstage, scenario.kind === 'psychology');
+        }
+    });
+});
+
+test('分析/侧写独立路由，札记不写ctx.chat、不改变状态事件天数，保存只用saveView', async () => {
+    const f = fixture({ autoEnabled: true, routes: { analysis: 'secondary', simulation: 'main' } });
+    f.state.chat.npcStates['npc:1'].scene = 'present';
+    f.state.chat.travelPlans = [{ id: 'plan:existing', npcIds: ['npc:1'], status: 'paused', targetLocationId: 'loc:2' }];
+    const before = structuredClone(f.state.chat), worldBefore = structuredClone(f.state.world);
+    Object.defineProperty(f.context, 'chat', { get() { assert.fail('不应访问酒馆主聊天'); } });
+    f.host.saveState = () => assert.fail('不应bump state');
+    f.service.sendRequest = async (...args) => { f.calls.secondary.push(args); return { content: JSON.stringify({ scenes: [sceneRow('unknown')] }) }; };
+    f.context.generateRaw = async options => { f.calls.main.push(options); return JSON.stringify({ notes: [noteRow('psychology')] }); };
+    assert.deepEqual(await f.features.generateAutomaticNotes({ sourceKey: 'reply:2' }), { generated: 1, skipped: 0 });
+    assert.equal(f.calls.secondary.length, 1);
+    assert.equal(f.calls.main.length, 1);
+    assert.match(f.calls.secondary[0][1][1].content, /最近正文/);
+    assert.match(f.calls.main[0].systemPrompt, /100–300.*1000/);
+    assert.match(f.calls.main[0].systemPrompt, /锁定.*行程/);
+    assert.match(f.calls.main[0].prompt, /既有行程.*plan:existing/);
+    assert.equal(f.saved(), 1);
+    const { autoNotes, autoCursor, ...afterChat } = f.state.chat;
+    assert.deepEqual(afterChat, before);
+    assert.deepEqual(f.state.world, worldBefore);
+    assert.equal(autoNotes[0].backstage, true);
+    assert.equal(autoCursor, 0);
+    f.host.automationStatus = () => ({ status: 'waiting', completedReplies: 2 });
+    assert.deepEqual(f.features.snapshot().automation, { status: 'waiting', completedReplies: 2 });
+    assert.deepEqual(f.features.snapshot().autoNotes, autoNotes);
+});
+
+test('分析和侧写响应严格过滤名单、kind、重复和1000字上限；解析异常明确失败', async t => {
+    const f = fixture({ autoEnabled: true });
+    f.state.chat.npcStates['npc:1'].scene = 'present';
+    automaticResponses(f, [], [noteRow('gesture', '陌生角色', 'npc:other'), noteRow('other'), noteRow('activity'),
+        noteRow('gesture', ' '.repeat(5)), noteRow('gesture', '字'.repeat(1001)), noteRow('gesture', '字'.repeat(1000)), noteRow('psychology')]);
+    assert.deepEqual(await f.features.generateAutomaticNotes(), { generated: 1, skipped: 0 });
+    assert.equal(f.state.chat.autoNotes[0].text.length, 1000);
+    for (const phase of ['analysis', 'simulation']) await t.test(phase, async () => {
+        const broken = fixture({ autoEnabled: true });
+        broken.state.chat.npcStates['npc:1'].scene = 'present';
+        let count = 0;
+        broken.context.generateRaw = async () => ++count === 1 && phase === 'simulation' ? '{"scenes":[]}' : 'not JSON';
+        await assert.rejects(broken.features.generateAutomaticNotes(), /JSON|Unexpected/);
+        assert.equal(broken.saved(), 0);
+        assert.equal(broken.state.chat.autoNotes, undefined);
+    });
+});
+
+test('自动任务在排队发送前及两阶段响应后丢弃旧身份/正文/状态/关闭/资格变化/取消', async t => {
+    for (const phase of ['queued', 'analysis', 'simulation', 'simulationQueued']) {
+        for (const mutation of ['identity', 'signature', 'revision', 'disabled', 'archived', 'ignored', 'tracked', 'confirmed', 'chat', 'world', 'isCurrent', 'destroy']) {
+            await t.test(`${phase}:${mutation}`, async () => {
+                const f = fixture({ autoEnabled: true }), gate = deferred(), started = deferred();
+                f.state.chat.npcStates['npc:1'].scene = 'present';
+                let active = true, blocker, queuedBlocker;
+                const finishBlocker = deferred(), blockerStarted = deferred();
+                let count = 0;
+                f.context.generateRaw = async options => {
+                    f.calls.main.push(options); count++;
+                    if (phase === 'queued' || (phase === 'analysis' && count === 1) || (phase === 'simulation' && count === 2)) {
+                        started.resolve(); return gate.promise;
+                    }
+                    if (phase === 'simulationQueued' && count === 1) {
+                        // 分析尚未返回时插入普通请求，侧写必须在它后面等待。
+                        queuedBlocker = f.features.request('阻塞', '阻塞');
+                        return '{"scenes":[]}';
+                    }
+                    if (phase === 'simulationQueued' && count === 2) { blockerStarted.resolve(); return finishBlocker.promise; }
+                    return count === 1 ? '{"scenes":[]}' : '{"notes":[]}';
+                };
+                if (phase === 'queued') { blocker = f.features.request('阻塞', '阻塞').catch(() => {}); await started.promise; }
+                const pending = f.features.generateAutomaticNotes({ isCurrent: () => active });
+                if (phase === 'simulationQueued') await blockerStarted.promise;
+                else if (phase !== 'queued') await started.promise;
+                if (mutation === 'identity') f.switchIdentity();
+                if (mutation === 'signature') f.changeSignature();
+                if (mutation === 'revision') f.state.chat.stateRevision++;
+                if (mutation === 'disabled') f.state.store.preferences.autoEnabled = false;
+                if (mutation === 'archived' || mutation === 'ignored') f.state.world.catalog.npcs[0] = { ...f.state.world.catalog.npcs[0], [mutation]: true };
+                if (mutation === 'tracked' || mutation === 'confirmed') f.state.world.catalog.npcs[0][mutation] = false;
+                if (mutation === 'chat') f.state.chat = structuredClone(f.state.chat);
+                if (mutation === 'world') f.state.world = structuredClone(f.state.world);
+                if (mutation === 'isCurrent') active = false;
+                if (mutation === 'destroy') f.features.destroy();
+                gate.resolve(phase === 'simulation' ? '{"notes":[{"npcId":"npc:1","kind":"gesture","text":"旧内容"}]}' : '{"scenes":[]}');
+                finishBlocker.resolve('完成');
+                if (blocker) await blocker;
+                if (queuedBlocker) await queuedBlocker.catch(() => {});
+                assert.deepEqual(await pending, { generated: 0, skipped: 1 });
+                assert.equal(f.state.chat.autoNotes, undefined);
+                assert.equal(f.state.chat.autoCursor, undefined);
+                assert.equal(f.saved(), 0);
+                assert.equal(f.calls.main.length, phase === 'simulation' || phase === 'simulationQueued' ? 2 : 1);
+                assert.equal(f.features.busy(), false);
+            });
+        }
+    }
+});
+
+test('每批最多6人按autoCursor轮转，札记只保留40条；全unknown也轮转且不发第二请求', async () => {
+    const f = fixture({ autoEnabled: true });
+    f.state.world.catalog.npcs = Array.from({ length: 8 }, (_, i) => ({ id: `npc:${i + 1}`, name: `角色${i + 1}`, tracked: true, confirmed: true }));
+    f.state.chat.npcStates = Object.fromEntries(f.state.world.catalog.npcs.map(npc => [npc.id, { scene: 'present', locationId: 'loc:1' }]));
+    f.state.chat.autoNotes = Array.from({ length: 39 }, (_, i) => ({ id: `old:${i}` }));
+    const batches = [];
+    f.context.generateRaw = async options => {
+        f.calls.main.push(options);
+        if (options.prompt.includes('名单及已有已确认场景：')) {
+            const roster = JSON.parse(options.prompt.split('\n')[0].split('：')[1]);
+            batches.push(roster.map(npc => npc.npcId));
+            return '{"scenes":[]}';
+        }
+        return JSON.stringify({ notes: batches.at(-1).map(id => noteRow('gesture', '当前小动作', id)) });
+    };
+    assert.deepEqual(await f.features.generateAutomaticNotes(), { generated: 6, skipped: 0 });
+    assert.equal(f.state.chat.autoCursor, 6);
+    assert.deepEqual(await f.features.generateAutomaticNotes(), { generated: 6, skipped: 0 });
+    assert.equal(f.state.chat.autoCursor, 4);
+    assert.deepEqual(batches, [['npc:1', 'npc:2', 'npc:3', 'npc:4', 'npc:5', 'npc:6'], ['npc:7', 'npc:8', 'npc:1', 'npc:2', 'npc:3', 'npc:4']]);
+    assert.equal(f.state.chat.autoNotes.length, 40);
+    assert.equal(f.state.chat.autoNotes[0].id, 'old:11');
+    for (const npc of f.state.world.catalog.npcs) f.state.chat.npcStates[npc.id].scene = 'unknown';
+    const beforeCalls = f.calls.main.length;
+    assert.deepEqual(await f.features.generateAutomaticNotes(), { generated: 0, skipped: 6 });
+    assert.equal(f.calls.main.length - beforeCalls, 1);
+    assert.equal(f.state.chat.autoCursor, 2);
+});
+
 test('snapshot 分离活跃/归档/忽略 NPC，保留全部原字段及可读历史', () => {
     const f = fixture();
     const before = f.features.snapshot();
@@ -237,7 +462,8 @@ test('snapshot 分离活跃/归档/忽略 NPC，保留全部原字段及可读�
     for (const key of Object.keys(before).filter(key => key !== 'archivedNpcs')) assert.deepEqual(snapshot[key], before[key], key);
     assert.deepEqual(Object.keys(snapshot).sort(), [
         'identity', 'worldLabel', 'day', 'playerName', 'npcs', 'archivedNpcs', 'locations', 'routes',
-        'events', 'diaries', 'conversations', 'preferences', 'profiles', 'profileError', 'memory', 'mapImage', 'busy',
+        'events', 'diaries', 'conversations', 'preferences', 'profiles', 'profileError', 'profileMessage', 'serviceError',
+        'memory', 'mapImage', 'busy', 'autoNotes', 'automation',
     ].sort());
     f.state.world.catalog.npcs[0].archived = true;
     const archived = f.features.snapshot();

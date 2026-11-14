@@ -23,7 +23,7 @@ const names = [
     'normalizeFact', 'applyCanonFact', 'extractStoryFacts', 'addEvent', 'save', 'savePreferences',
     'findRoute', 'validateTransition', 'evaluateAppearanceRequest', 'evaluateRequestMotivation', 'confirmTravelPlan',
     'advanceTravelPlans', 'commitGameDay', 'validateSimulationEvents', 'simulateDay',
-    'generateSceneGestures', 'checkIdentity', 'syncPrompt', 'setManualNpcLocation',
+    'generateSceneGestures', 'checkIdentity', 'syncPrompt', 'setManualNpcLocation', 'openConnectionManager',
 ];
 const loadCore = new Function('environment', `
     const { SillyTavern, $, jQuery, extension_prompt_types, extension_prompt_roles,
@@ -744,6 +744,29 @@ test('scene gestures are presentation only and use the configured player name; p
     const version = f.chat.stateRevision;
     f.api.savePreferences(); assert.equal(f.chat.stateRevision, version);
     assert.equal(f.calls.saves, 1);
+});
+
+test('connection manager navigation opens only the verified drawer and leaves connection settings unchanged', () => {
+    const f = fixture();
+    const before = structuredClone(f.ctx.extensionSettings);
+    let opened = false, clicks = 0, focused = 0;
+    const panel = { classList: { contains: name => name === 'openDrawer' && opened } };
+    const profiles = { focus() { focused++; }, scrollIntoView() {} };
+    const toggle = { click() { clicks++; opened = true; } };
+    const document = {
+        getElementById: id => id === 'rm_api_block' ? panel : id === 'connection_profiles' ? profiles : null,
+        querySelector: selector => selector === '#sys-settings-button > .drawer-toggle' ? toggle : null,
+    };
+    // Load this small real function with an isolated DOM; no host button handlers are executed.
+    const match = originalSource.match(/function openConnectionManager\(\) \{[\s\S]*?\n\}/);
+    assert.ok(match);
+    const open = new Function('document', `${match[0]}; return openConnectionManager;`)(document);
+    open(); open();
+    assert.equal(clicks, 1);
+    assert.equal(focused, 2);
+    assert.deepEqual(f.ctx.extensionSettings, before);
+    document.getElementById = () => null;
+    assert.throws(open, /连接管理器未加载或已禁用/);
 });
 
 let failures = 0;

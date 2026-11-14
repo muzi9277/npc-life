@@ -20,11 +20,11 @@ export function mountConsole(adapter) {
     if (!$ || !adapter) throw new Error('NPC Life 控制台需要 jQuery 和 adapter。');
     $('#npc-life-console').remove();
     let state = adapter.snapshot() || {}, tab = '动态', npcId = '', diaryId = '', busy = false, destroyed = false;
-    let minimized = false, maximized = false, restoreRect = null, oldPanel = null, oldPanelParent = null, oldPanelNext = null;
+    let minimized = false, maximized = false, restoreRect = null, oldPanel = null, oldPanelParent = null, oldPanelNext = null, automationBusy = false;
     let drafts = Object.create(null), generalDrafts = Object.create(null), renderedIdentity = state.identity, renderedTab = '', renderedNpc = '', identityEpoch = 0;
     let priorFocus = null, sizeObserver = null, modalFocus = null, modalKind = '', modalProfileId = '', modalEpoch = 0, modalBusy = false;
     const cleanups = [], root = $('<section id="npc-life-console" class="nlc" hidden aria-label="NPC Life 控制台" tabindex="-1"></section>');
-    root.html(`<header class="nlc-bar" data-drag><strong>NPC Life</strong><span class="nlc-version">3.0.0-beta.2</span><span class="nlc-world"></span><span class="nlc-controls"><button type="button" class="menu_button" data-smaller aria-label="缩小窗口" title="缩小">−</button><button type="button" class="menu_button" data-larger aria-label="放大窗口" title="放大">＋</button><button type="button" class="menu_button" data-min aria-label="最小化窗口" title="最小化">⌄</button><button type="button" class="menu_button" data-max aria-label="最大化或恢复窗口" title="最大化/恢复">□</button><button type="button" class="menu_button" data-close aria-label="关闭窗口" title="关闭">×</button></span></header><nav class="nlc-tabs" role="tablist" aria-label="控制台页面"></nav><div class="nlc-status" role="status" aria-live="polite"></div><main class="nlc-pages" role="tabpanel"></main>`);
+    root.html(`<header class="nlc-bar" data-drag><strong>NPC Life</strong><span class="nlc-version">3.0.0-beta.3</span><span class="nlc-world"></span><span class="nlc-controls"><button type="button" class="menu_button" data-smaller aria-label="缩小窗口" title="缩小">−</button><button type="button" class="menu_button" data-larger aria-label="放大窗口" title="放大">＋</button><button type="button" class="menu_button" data-min aria-label="最小化窗口" title="最小化">⌄</button><button type="button" class="menu_button" data-max aria-label="最大化或恢复窗口" title="最大化/恢复">□</button><button type="button" class="menu_button" data-close aria-label="关闭窗口" title="关闭">×</button></span></header><nav class="nlc-tabs" role="tablist" aria-label="控制台页面"></nav><div class="nlc-status" role="status" aria-live="polite"></div><main class="nlc-pages" role="tabpanel"></main>`);
     $('body').append(root);
     const channelDialog = $(`<div class="nlc-channel-overlay" hidden><section class="nlc-channel-dialog" role="dialog" aria-modal="true" aria-labelledby="nlc-channel-title" tabindex="-1"><header><b id="nlc-channel-title"></b><button type="button" class="menu_button" data-channel-close aria-label="关闭对话框">×</button></header><div class="nlc-channel-body"></div></section></div>`);
     $('body').append(channelDialog);
@@ -58,7 +58,7 @@ export function mountConsole(adapter) {
         const bucket = renderedTab === '联系人' ? (drafts[renderedNpc] ||= Object.create(null)) : (generalDrafts[renderedTab] ||= Object.create(null));
         pages.find('[data-field],[data-pref],[data-route],[data-template],[data-tags]').each(function () {
             if ($(this).closest('.nlc-workbench-body').length) return;
-            const key = draftKey(this); if (key) bucket[key] = this.type === 'checkbox' ? this.checked : $(this).val();
+            const key = draftKey(this); if (key) bucket[key] = this.type === 'checkbox' ? this.checked : this.tagName === 'SELECT' ? this.value : $(this).val();
         });
         pages.find('details[data-draft-details]').each(function () { bucket[`details:${this.getAttribute('data-draft-details')}`] = this.open; });
     }
@@ -93,6 +93,34 @@ export function mountConsole(adapter) {
         } catch (error) { if (!destroyed && epoch === identityEpoch) tell(error?.message || String(error), true); return false; }
         finally { busy = false; root.removeClass('is-busy'); root.toggleClass('has-global-busy', Boolean(state.busy)); }
     }
+    // 后台自动记录仅以文本展示，心理侧写不作为角色事实。
+    function autoNotesCard(npc = null) {
+        const notes = (state.autoNotes || []).filter(n => !npc || n.npcId === npc.id).slice().sort((a,b) => (Number(b.ts) || Date.parse(b.ts) || 0) - (Number(a.ts) || Date.parse(a.ts) || 0)).slice(0, npc ? 12 : 20);
+        const section = card(npc ? '相关自动记录' : '最新自动记录').attr('data-auto-notes', npc ? npc.id : 'latest');
+        section.append($('<p class="nlc-muted">').text('后台生成的动作、活动与心理侧写仅供参考；心理侧写不权威。'));
+        notes.forEach(n => section.append($('<article class="nlc-item nlc-auto-note">').attr('data-note-id',n.id).append($('<b>').text(`${n.npcName || npc?.name || n.npcId || '未知联系人'} · 第 ${n.day ?? '?'} 天 · ${{ gesture:'动作', psychology:'心理侧写（仅供参考）', activity:'活动' }[n.kind] || '记录'}`), $('<p>').text(n.text || ''))));
+        if (!notes.length) section.append(empty(npc ? '此联系人暂无自动记录。' : '暂无自动记录。自动运转默认关闭，可在设置中启用。'));
+        return section;
+    }
+    // 自动状态来自核心快照；暂停与重置不修改其他表单草稿。
+    function automationCard() {
+        const a = state.automation || {}, every = a.every ?? state.preferences?.autoEveryReplies ?? 5;
+        const labels = { idle:'等待新 AI 正文', paused:'已暂停', disabled:'已关闭', running:'运行中', pending:'等待处理', waiting_generation:'等待正文生成结束', waiting_busy:'等待其他任务结束', paused_error:'出错后已暂停', unsupported:'当前宿主不支持自动运转', destroyed:'已停止' };
+        const section = card('自动运转').attr('data-automation','');
+        section.append($('<p data-automation-status role="status" aria-live="polite">').text(`${a.enabled ? '已启用' : '已关闭'} · ${labels[a.status] || a.status || '等待新 AI 正文'} · 新 AI 正文 ${a.count ?? 0} / ${every}${a.pending ? ' · 有待处理任务' : ''}`));
+        if (a.unsupported) section.append($('<p class="nlc-muted">').text(typeof a.unsupported === 'string' ? a.unsupported : '当前宿主不支持自动运转事件，请使用手动操作。'));
+        if (a.error) section.append($('<p class="nlc-error">').text(a.error));
+        section.append($('<div class="nlc-row">').append(button('暂停自动运转', 'pause-automation').prop('disabled', !a.enabled || typeof adapter.pauseAutomation !== 'function'), button('重置计数', 'reset-automation').prop('disabled', typeof adapter.resetAutomation !== 'function')), $('<p class="nlc-muted">').text('仅按新 AI 正文计数；达到间隔后每轮最多轮转 6 位联系人，每轮 2 次请求（analysis + simulation）。不推进日期，不向主聊天写正文；心理侧写不权威。'));
+        return section;
+    }
+    // 暂停应在自动任务占用核心时仍可执行，单独防止重复点击。
+    async function controlAutomation(reset = false) {
+        if (automationBusy || destroyed) return;
+        captureDrafts(); automationBusy = true; const epoch = identityEpoch;
+        try { await (reset ? adapter.resetAutomation() : adapter.pauseAutomation()); if (!destroyed && epoch === identityEpoch) { render(false); tell(reset ? '自动运转计数已重置。' : '自动运转已暂停。'); } }
+        catch (error) { if (!destroyed && epoch === identityEpoch) tell(error?.message || String(error),true); }
+        finally { automationBusy = false; }
+    }
     // 创建动态总览并只移动旧工作台节点以保留监听器。
     function overview() {
         const page = $('<div class="nlc-page">'), cards = $('<div class="nlc-grid">');
@@ -101,7 +129,7 @@ export function mountConsole(adapter) {
         const workbench = $('<details class="nlc-workbench"><summary>高级世界工作台</summary><div class="nlc-workbench-body"></div></details>');
         try { const panel = oldPanel || adapter.getWorkbench?.(); if (panel?.nodeType) { if (!oldPanel) { oldPanel = panel; oldPanelParent = panel.parentNode; oldPanelNext = panel.nextSibling; } workbench.find('.nlc-workbench-body').append(panel); } }
         catch (error) { tell(error?.message || String(error), true); }
-        page.append(cards, workbench); pages.append(page);
+        page.append(automationCard(), autoNotesCard(), cards, workbench); pages.append(page);
     }
     // 创建联系人资料、日记和独立后台试聊分组。
     function contacts() {
@@ -123,7 +151,7 @@ export function mountConsole(adapter) {
             const chatCard = card('后台试聊'), chat = $('<div class="nlc-chat" role="log" aria-label="试聊记录">');
             ((state.conversations || {})[npc.id] || []).forEach(m => chat.append($('<div class="nlc-bubble">').addClass(m.role === 'user' ? 'from-user' : 'from-npc').text(m.content || '')));
             chatCard.append(chat, chat.children().length ? '' : empty('还没有试聊记录。此处独立保存，不发送到酒馆主聊天。'), $('<label class="nlc-field">').append($('<span>').text('试聊消息'), $('<textarea class="text_pole" data-field="chat-text" rows="3" placeholder="Enter 发送，Shift+Enter 换行"></textarea>')), $('<div class="nlc-row">').append(button('发送', 'chat-send'), button('清空记录', 'chat-clear')));
-            detail.append(info, diaryCard, chatCard);
+            detail.append(info, autoNotesCard(npc), diaryCard, chatCard);
         }
         page.append(roster, detail); pages.append(page);
     }
@@ -162,19 +190,33 @@ export function mountConsole(adapter) {
         else (state.memory.tables || []).forEach((t,i) => { const table = $('<details>').attr('data-draft-details', `memory-${i}`).append($('<summary>').text(t.name || '数据表')); table.append($('<pre class="nlc-pre">').text(JSON.stringify(t.data ?? [], null, 2))); memory.append(table); });
         memory.append(button('刷新记忆', 'memory-refresh')); page.append(archived, events, diaries, memory); pages.append(page);
     }
+    // 原生 Connection Manager 的配置流程，不在控制台伪造参数输入。
+    function connectionGuide() {
+        const guide = $('<details class="nlc-connection-guide" data-draft-details="connection-guide"><summary>如何新增副连接（原生 Connection Manager）</summary></details>'), steps = $('<ol>');
+        ['先在酒馆 Connection Manager 中将当前主连接保存为主 profile。', '打开酒馆 API 抽屉，配置副连接的供应商、地址、模型与密钥。', '在 Connection Manager 中为这套副连接创建并保存一个 profile。', '切回原来的主 profile，确认主聊天仍使用主连接。', '重新打开 NPC Life 设置，点击“刷新列表”，选择副 profile，再保存偏好及任务路由。'].forEach(text => steps.append($('<li>').text(text)));
+        return guide.append(steps, $('<p class="nlc-muted">').text('打开管理器时会暂时隐藏控制台，草稿保留。Profile 与密钥的保存方式由酒馆决定，不能保证同一供应商的不同 profile 使用独立密钥；请在原生 API 抽屉核对实际密钥。'));
+    }
     // 按用途分组展示偏好、模型路由、模板与数据管理。
     function settings() {
         const p = state.preferences || {}, page = $('<div class="nlc-page nlc-settings">');
         const basic = card('基础偏好').append($('<div class="nlc-form-grid">').append(field('用户称呼', 'userName', p.userName), field('日记字数', 'diaryChars', p.diaryChars, 'number'), field('上下文预算', 'contextChars', p.contextChars, 'number')));
         const memory = card('增强记忆').append($('<label class="checkbox_label"><input type="checkbox" data-pref="memoryEnabled"><span>启用增强记忆</span></label>').find('input').prop('checked', Boolean(p.memoryEnabled)).end(), field('记忆预算', 'memoryChars', p.memoryChars, 'number'));
-        const profile = $('<select class="text_pole" data-field="secondaryProfileId"><option value="">无副 profile</option></select>'); (state.profiles || []).forEach(x => profile.append($('<option>').val(x.id).text(`${x.name || x.id} · ${x.model || '模型未知'}`))); profile.val(p.secondaryProfileId || '');
-        const connection = card('模型与任务路由').append($('<label class="nlc-field">').append($('<span>').text('副 API profile'), profile), $('<div class="nlc-row">').append(button('查看 profile / 测试连接', 'edit-secondary-profile')), $('<p class="nlc-muted">').text('渠道由酒馆 Connection Manager 管理。保存偏好后可测试副连接，路由随保存生效。'));
+        const auto = card('自动运转').append($('<label class="checkbox_label"><input type="checkbox" data-pref="autoEnabled"><span>启用自动运转（默认关闭）</span></label>').find('input').prop('checked', p.autoEnabled === true).end(), field('每多少条新 AI 正文运行一次', 'autoEveryReplies', p.autoEveryReplies ?? 5, 'number').find('input').attr({ min:1, max:100, step:1 }).end(), $('<p class="nlc-muted">').text('仅按新 AI 正文计数；每轮最多轮转 6 位联系人，每轮 2 次请求（analysis + simulation）。不推进日期，不向主聊天写正文；心理侧写仅供参考，不权威。保存偏好后生效，可在动态页暂停或重置计数。'));
+        const profile = $('<select class="text_pole" data-field="secondaryProfileId"><option value="">无副 profile</option></select>'), profiles = state.profiles || [];
+        profiles.forEach(x => profile.append($('<option>').val(x.id).text(`${x.name || x.id} · ${x.model || '模型未知'}`)));
+        // 失效的已保存选择及刷新前的草稿都保留，disabled option 不能由 jQuery.val() 读取。
+        const selected = generalDrafts['设置']?.['field:secondaryProfileId'] ?? p.secondaryProfileId ?? '';
+        new Set([p.secondaryProfileId, selected].filter(Boolean)).forEach(id => { if (!profiles.some(x => x.id === id)) profile.append($('<option disabled>').val(id).text(`不可用 profile：${id}（保留选择，请刷新或重新选择）`)); });
+        profile.val(selected);
+        const connection = card('模型与任务路由').append($('<label class="nlc-field">').append($('<span>').text('副 API profile'), profile), $('<div class="nlc-row">').append(button('新增/管理连接', 'manage-connections'), button('刷新列表', 'refresh-profiles'), button('查看 profile / 测试连接', 'edit-secondary-profile')), $('<p class="nlc-muted">').text('渠道由酒馆 Connection Manager 管理。保存偏好后可测试副连接，路由随保存生效。'), connectionGuide());
+        if (state.profileError) connection.append($('<p class="nlc-error" data-profile-error role="alert">').text(`连接列表读取失败：${state.profileError}`));
+        else if (!profiles.length) connection.append(empty(state.profileMessage || '连接列表已读取，暂无可用 profile。请先新增连接，再刷新列表。').attr('data-profile-empty',''));
         const routes = $('<div class="nlc-form-grid">'); ['analysis','simulation','narrative','chat'].forEach(task => { const sel = $('<select class="text_pole" data-route>').attr('data-task',task).append('<option value="main">主 profile</option><option value="secondary">副 profile</option>').val(p.routes?.[task] || 'main'); routes.append($('<label class="nlc-field">').append($('<span>').text({ analysis:'分析', simulation:'模拟', narrative:'叙事', chat:'试聊' }[task]), sel)); });
         connection.append(routes, field('最大生成 token', 'maxTokens', p.maxTokens, 'number'));
         const templates = $('<details class="nlc-card" data-draft-details="templates"><summary>任务附加模板</summary></details>'); ['narrative','chat','analysis','simulation'].forEach(k => templates.append($('<label class="nlc-field">').append($('<span>').text({narrative:'叙事',chat:'试聊',analysis:'分析',simulation:'模拟'}[k]), $('<textarea class="text_pole" rows="3" data-template>').attr('data-template', k).val(p.templates?.[k] || ''))));
         const data = card('数据管理').append($('<div class="nlc-row">').append(button('导出数据', 'export'), $('<label class="menu_button nlc-upload">导入数据<input type="file" data-data-file accept=".json,application/json" hidden></label>')));
-        page.append(basic, memory, connection, templates, $('<div class="nlc-row nlc-save-row">').append(button('保存偏好', 'save-preferences'), button('取消修改', 'cancel-preferences')), data);
-        if (state.profileError) page.append($('<p class="nlc-error">').text(state.profileError)); pages.append(page);
+        page.append(basic, memory, auto, connection, templates, $('<div class="nlc-row nlc-save-row">').append(button('保存偏好', 'save-preferences'), button('取消修改', 'cancel-preferences')), data);
+        pages.append(page);
     }
     // 刷新视图前保留草稿、输入焦点、光标和滚动位置。
     function render(capture = true) {
@@ -194,7 +236,7 @@ export function mountConsole(adapter) {
     }
     // 将设置表单转换为 adapter 接受的偏好补丁。
     function preferencePatch() {
-        const patch = { userName:root.find('[data-field="userName"]').val(), diaryChars:Number(root.find('[data-field="diaryChars"]').val()), contextChars:Number(root.find('[data-field="contextChars"]').val()), memoryEnabled:root.find('[data-pref="memoryEnabled"]').prop('checked'), memoryChars:Number(root.find('[data-field="memoryChars"]').val()), secondaryProfileId:root.find('[data-field="secondaryProfileId"]').val(), maxTokens:Number(root.find('[data-field="maxTokens"]').val()), routes:{}, templates:{} };
+        const patch = { userName:root.find('[data-field="userName"]').val(), diaryChars:Number(root.find('[data-field="diaryChars"]').val()), contextChars:Number(root.find('[data-field="contextChars"]').val()), memoryEnabled:root.find('[data-pref="memoryEnabled"]').prop('checked'), memoryChars:Number(root.find('[data-field="memoryChars"]').val()), secondaryProfileId:root.find('[data-field="secondaryProfileId"]')[0]?.value || '', autoEnabled:root.find('[data-pref="autoEnabled"]').prop('checked'), autoEveryReplies:Number(root.find('[data-field="autoEveryReplies"]').val()), maxTokens:Number(root.find('[data-field="maxTokens"]').val()), routes:{}, templates:{} };
         root.find('[data-route]').each(function () { patch.routes[$(this).attr('data-task')] = $(this).val(); }); root.find('[data-template]').each(function () { patch.templates[$(this).attr('data-template')] = $(this).val(); }); return patch;
     }
     // 只接受明确支持的地图图片格式。
@@ -203,14 +245,21 @@ export function mountConsole(adapter) {
     function showDialog(title, kind) { closeDialog(false); modalFocus = document.activeElement; modalKind = kind; modalEpoch++; channelDialog.find('#nlc-channel-title').text(title); channelDialog.find('.nlc-channel-body').empty(); channelDialog.prop('hidden',false); root.attr('inert',''); }
     // 关闭对话框并尽可能恢复触发控件焦点。
     function closeDialog(restore = true) { const focus = modalFocus; modalEpoch++; modalKind = ''; modalBusy = false; modalProfileId = ''; channelDialog.prop('hidden',true); root.removeAttr('inert'); if (restore && !root.prop('hidden')) { if (focus?.isConnected) focus.focus(); else (root.find('[data-action="edit-secondary-profile"]')[0] || root[0]).focus(); } }
+    // 管理器由宿主显示；先撤掉本地遮罩，失败时恢复控制台并显示错误。
+    async function openConnectionManager(event) {
+        event?.preventDefault(); event?.stopPropagation(); captureDrafts();
+        const wasHidden = root.prop('hidden'); closeDialog(false); persist(); root.prop('hidden',true);
+        try { if (typeof adapter.openConnectionManager !== 'function') throw new Error('当前核心尚未提供 Connection Manager 入口。'); await adapter.openConnectionManager(); }
+        catch (error) { if (!destroyed) { root.prop('hidden',wasHidden); tell(error?.message || String(error),true); if (!wasHidden) (root.find('[data-action="manage-connections"]')[0] || root[0]).focus(); } }
+    }
     // 展示真实 profile 的只读详情，不伪装可编辑连接参数。
     function openChannelDialog() {
-        captureDrafts(); const id = String(root.find('[data-field="secondaryProfileId"]').val() || ''), current = state.profiles?.find(item => item.id === id);
+        captureDrafts(); const id = String(root.find('[data-field="secondaryProfileId"]')[0]?.value || ''), current = state.profiles?.find(item => item.id === id);
         showDialog('副 API profile 详情', 'profile'); modalProfileId = current?.id || '';
         const body = channelDialog.find('.nlc-channel-body'), details = $('<dl class="nlc-profile-details">');
         [['名称',current?.name || current?.id || '未选择'],['Profile ID',current?.id || '—'],['模型',current?.model || '未知'],['预设',current?.preset || '默认']].forEach(([label,value]) => details.append($('<dt>').text(label), $('<dd>').text(value)));
         const canTest = current && current.id === state.preferences?.secondaryProfileId;
-        body.append(details, $('<p class="nlc-muted">').text('此处显示当前选择的 profile。地址、密钥及连接参数请在酒馆内置 Connection Manager 中管理。'), $('<div class="nlc-channel-actions">').append($('<button type="button" class="menu_button" data-channel-test>测试此 profile</button>').prop('disabled',!canTest || typeof adapter.testSecondaryProfile !== 'function'), $('<button type="button" class="menu_button" data-channel-done>关闭</button>')), $('<div class="nlc-status" data-channel-status role="status" aria-live="polite">').text(!current ? '请先选择一个可用的副 API profile。' : !canTest ? '此 profile 尚未保存，请关闭弹窗并保存偏好后再测试。' : '测试会向此已保存的 profile 发起真实请求。'));
+        body.append(details, $('<p class="nlc-muted">').text('此处显示当前选择的 profile。地址、密钥及连接参数请在酒馆内置 Connection Manager 中管理。'), connectionGuide(), $('<div class="nlc-channel-actions">').append($('<button type="button" class="menu_button" data-channel-manager>新增/管理连接</button>'), $('<button type="button" class="menu_button" data-channel-test>测试此 profile</button>').prop('disabled',!canTest || typeof adapter.testSecondaryProfile !== 'function'), $('<button type="button" class="menu_button" data-channel-done>关闭</button>')), $('<div class="nlc-status" data-channel-status role="status" aria-live="polite">').text(!current ? '请先选择一个可用的副 API profile。' : !canTest ? '此 profile 尚未保存，请关闭弹窗并保存偏好后再测试。' : '测试会向此已保存的 profile 发起真实请求。'));
         channelDialog.find('[data-channel-close]')[0].focus();
     }
     // 在对话框内执行真实连接测试，并隔离已关闭或旧身份的结果。
@@ -226,14 +275,18 @@ export function mountConsole(adapter) {
     function confirmArchive(ignored) {
         const npc = (state.npcs || []).find(n => n.id === npcId); if (!npc) return;
         const id = npc.id, identity = state.identity; showDialog(ignored ? '确认永久忽略联系人' : '确认删除联系人', 'confirm');
-        const message = ignored ? `永久忽略「${npc.name || id}」后，该角色将移出活跃联系人，并阻止后续自动重新加入。已有日记、事件、试聊和其他历史记录保留；可在档案页恢复并解除忽略。` : `删除「${npc.name || id}」会将该角色移出活跃联系人并归档，不会删除已有日记、事件、试聊和其他历史记录。可在档案页恢复；普通删除不阻止后续自动重新加入。`;
+        const message = ignored ? `永久忽略「${npc.name || id}」后，该角色将移出活跃联系人，并阻止后续自动重新加入。已有日记、事件、试聊和其他历史记录保留；可在档案页恢复并解除忽略。` : `删除「${npc.name || id}」会将该角色移出活跃联系人并归档，不会删除已有日记、事件、试聊和其他历史记录。可在档案页恢复；扫描不会自动恢复已删除的联系人。`;
         const body = channelDialog.find('.nlc-channel-body'); body.append($('<p>').text(message), $('<div class="nlc-channel-actions">').append($('<button type="button" class="menu_button" data-channel-done>取消</button>'), $('<button type="button" class="menu_button" data-confirm-archive>').text(ignored ? '确认永久忽略' : '确认删除')));
         body.find('[data-confirm-archive]').on('click.nlcConfirm', () => { if (identity !== (adapter.snapshot() || {}).identity) { render(); return; } closeDialog(); run(() => { if (typeof adapter.archiveNpc !== 'function') throw new Error('当前核心尚未提供联系人归档接口。'); return adapter.archiveNpc(id,ignored); }, () => { delete drafts[id]; if (npcId === id) { npcId = ''; diaryId = ''; } tell(ignored ? '联系人已永久忽略，历史保留，可在档案恢复。' : '联系人已归档，历史保留。'); }); });
         body.find('[data-channel-done]')[0].focus();
     }
     // 处理窗口控制和业务按钮，并在切换前保存草稿。
-    root.on('click.nlc', '[data-action],[data-tab],[data-close],[data-min],[data-max]', function () {
+    root.on('click.nlc', '[data-action],[data-tab],[data-close],[data-min],[data-max]', function (event) {
         const el = $(this), action = el.attr('data-action'); captureDrafts();
+        if (action === 'manage-connections') { openConnectionManager(event); return; }
+        if (action === 'refresh-profiles') { try { render(false); tell('连接列表已刷新，未保存的草稿已保留。'); } catch (error) { tell(error?.message || String(error),true); } return; }
+        if (action === 'pause-automation') { controlAutomation(); return; }
+        if (action === 'reset-automation') { controlAutomation(true); return; }
         if (el.is('[data-tab]')) { tab = el.attr('data-tab'); persist(); render(false); root.find(`[data-tab="${tab}"]`)[0]?.focus(); return; }
         if (el.is('[data-close]')) { persist(); root.prop('hidden',true); priorFocus?.focus?.(); return; }
         if (el.is('[data-min]')) { if (!minimized) persist(); minimized = !minimized; root.toggleClass('is-minimized',minimized); if (!minimized) { clampConsole(root[0]); persist(); } return; }
@@ -249,7 +302,7 @@ export function mountConsole(adapter) {
         if (action === 'chat-send') { const text = String(root.find('[data-field="chat-text"]').val() || '').trim(), id = npcId; if (!text) return; run(() => adapter.sendChat(id,text), () => { if (drafts[id]?.['field:chat-text']?.trim() === text) drafts[id]['field:chat-text'] = ''; tell('试聊回复已记录。'); }, { npc:id, tab:'联系人' }); return; }
         if (action === 'chat-clear') { const id = npcId; run(() => adapter.clearChat(id), () => tell('试聊记录已清空。')); return; }
         if (action === 'import-map') { const raw = String(root.find('[data-field="map-json"]').val() || ''); run(() => adapter.importMap(raw), () => { if (generalDrafts['地图']?.['field:map-json'] === raw) delete generalDrafts['地图']['field:map-json']; tell('地图数据已导入。'); }); return; }
-        if (action === 'save-preferences') { const patch = preferencePatch(), submitted = JSON.stringify(generalDrafts['设置']); run(() => adapter.savePreferences(patch), () => { if (JSON.stringify(generalDrafts['设置']) === submitted) delete generalDrafts['设置']; tell('设置已保存。'); }); return; }
+        if (action === 'save-preferences') { const patch = preferencePatch(), submitted = JSON.stringify(generalDrafts['设置']); if (!Number.isInteger(patch.autoEveryReplies) || patch.autoEveryReplies < 1 || patch.autoEveryReplies > 100) { tell('自动运转间隔须为 1–100 的整数。',true); return; } run(() => adapter.savePreferences(patch), () => { if (JSON.stringify(generalDrafts['设置']) === submitted) delete generalDrafts['设置']; tell('设置已保存。'); }); return; }
         if (action === 'save-tags') { const id = el.attr('data-id'), input = root.find('[data-tags]').filter(function () { return this.getAttribute('data-id') === id; }), value = String(input.val() || ''); run(() => adapter.setLocationTags(id,value), () => { if (generalDrafts['地图']?.[`tags:${id}`] === value) delete generalDrafts['地图'][`tags:${id}`]; tell('地点标签已保存。'); }); return; }
         if (action === 'cancel-tags') { const id = el.attr('data-id'); if (generalDrafts['地图']) delete generalDrafts['地图'][`tags:${id}`]; render(false); return; }
         if (action === 'memory-refresh') { run(() => adapter.refreshMemory(), () => tell('记忆表已刷新。')); return; }
@@ -257,6 +310,7 @@ export function mountConsole(adapter) {
     });
     channelDialog.on('click.nlcChannel','[data-channel-close],[data-channel-done]', () => closeDialog());
     channelDialog.on('click.nlcChannel','[data-channel-test]', testProfile);
+    channelDialog.on('click.nlcChannel','[data-channel-manager]', openConnectionManager);
     // 每次输入立即保存草稿，筛选修改再刷新对应页面。
     root.on('input.nlc change.nlc','[data-field],[data-pref],[data-route],[data-template],[data-tags]', function () { if ($(this).closest('.nlc-workbench-body').length) return; captureDrafts(); if (this.getAttribute('data-field') === 'diary-chars') updateCustomChars(); });
     root.on('change.nlc','[data-field="map-tag"],[data-field="archive-npc"],[data-field="archive-day"]', () => render());

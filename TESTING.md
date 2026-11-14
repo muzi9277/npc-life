@@ -1,6 +1,6 @@
 # 测试说明
 
-版本目标：`3.0.0-beta.2`，运行环境：SillyTavern `1.17.0`。
+版本目标：`3.0.0-beta.3`，运行环境：SillyTavern `1.17.0`。
 
 ## 本地自动回归
 
@@ -9,6 +9,7 @@
 ```sh
 node tests/core.test.mjs
 node --test tests/services.test.mjs
+node --test tests/automation.test.mjs tests/integration.test.mjs
 ```
 
 UI 测试需开发环境安装 `happy-dom`；启用真实布局检查还需 `playwright` 和本机 Edge。通过 `ST_ROOT` 指向本机 SillyTavern 源目录，用于读取宿主随附 jQuery：
@@ -28,7 +29,7 @@ ST_ROOT=/path/to/SillyTavern UI_LAYOUT=1 node --test tests/console.test.mjs
 
 ### 浏览器 UI 测试
 
-安装包含以下 6 个运行文件：`index.js`、`style.css`、`console.js`、`console.css`、`services.js`、`manifest.json`。在浏览器加载扩展后执行 `Ctrl+F5`，确认扩展设置可打开，五页手机式控制台可切换，版本条诊断显示 `3.0.0-beta.2`。`services.js` 的职责包括 API 分流、只读记忆、独立后台试聊和地图导入。
+安装包含以下 7 个运行文件：`index.js`、`style.css`、`console.js`、`console.css`、`services.js`、`automation.js`、`manifest.json`。在浏览器加载扩展后执行 `Ctrl+F5`，确认扩展设置可打开，五页手机式控制台可切换，版本条诊断显示 `3.0.0-beta.3`。`services.js` 的职责包括 API 分流、只读记忆、独立后台试聊和地图导入。
 
 逐项检查：
 
@@ -39,6 +40,15 @@ ST_ROOT=/path/to/SillyTavern UI_LAYOUT=1 node --test tests/console.test.mjs
 - 设置变更重新加载后仍可从 `extensionSettings['npc-life']` 恢复；界面布局从 `localStorage` 恢复。
 - 关闭记忆增强开关时不读取记忆表；开启后只检查当前聊天最近非用户消息、关键词和行预算行为。
 - 未确认地点、未知解析结果和过期记忆不会覆盖当前状态。
+
+## 自动与连接入口回归
+
+- 自动默认关闭，开启后只计新的AI正文；已存在历史、重复渲染、重抽、续写、编辑、删除不额外计数。
+- 每N条触发、轮转6人、单一在途任务、宿主忙时等待、关闭/切身份/正文变更丢旧结果、失败暂停无循环请求。
+- 场景分析必须有证据或明确存档支持；在场仅动作/心理，离场仅当前已知地点活动，未知跳过。
+- 自动记录只存autoNotes，不写ctx.chat、events、canon、不推进day；心理不注入角色可知上下文。
+- 连接列表为空、异常和缺失服务显示不同提示；新增管理入口只打开宿主抽屉，不自动填参数/切profile；缺DOM明确报错。
+- 创建profile后刷新保留设置草稿，失效profile显示但不可测；同供应商密钥隔离不在mock通过声明内。
 
 ## API mocks
 
