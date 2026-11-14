@@ -25,6 +25,18 @@
     white-space: pre-wrap;
 }
 
+.npc-life-auto-settings .npc-life-auto-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.npc-life-auto-settings .menu_button {
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
 .npc-life-auto-settings small {
     display: block;
     line-height: 1.5;
