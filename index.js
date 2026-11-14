@@ -1,11 +1,13 @@
-/* NPC Life 3.0.0-beta.3：手机式控制台只是管理界面，不是剧情中的手机。 */
+/* NPC Life 3.0.0-beta.4：手机式控制台只是管理界面，不是剧情中的手机。 */
 // 已核对 ST 1.17.0 public/script.js 的真实枚举导出和深度注入签名。
 import { extension_prompt_types, extension_prompt_roles, isGenerating } from '../../../../script.js';
 import { mountConsole } from './console.js';
 import { createConsoleFeatures, normalizeConsolePreferences } from './services.js';
 import { createAutomationScheduler } from './automation.js';
+import { timelineContext } from './timeline.js';
+import { createWorldService } from './world-service.js';
 
-const RELEASE_VERSION = '3.0.0-beta.3';
+const RELEASE_VERSION = '3.0.0-beta.4';
 
 const MODULE_NAME = 'npc-life';
 const ROOT = '#npc-life-settings';
@@ -35,6 +37,9 @@ let settingsHostWasInert = false;
 let consoleView = null;
 let consoleFeatures = null;
 let automationScheduler = null;
+let worldService = null;
+let applyingWorldProjection = false;
+const WORLD_PROMPT_KEY = 'npc_life_timeline';
 
 // 返回酒馆上下文，不缓存会随聊天变化的对象。
 function getCtx() {
@@ -1069,6 +1074,7 @@ async function generateSceneGestures() {
 
 // 生成并校验当天的 NPC 生活事件，只有整批通过校验后才提交。
 async function simulateDay() {
+    assertLegacyClock();
     if (busy) return;
     const { world, chat } = activeData();
     const token = revision;
@@ -1332,6 +1338,7 @@ async function analyzeAppearanceRequest() {
 
 // 将可行的异地请求登记为旅行计划；计划开始不等于 NPC 已经到场。
 function confirmTravelPlan(requestId) {
+    assertLegacyClock();
     const { world, chat } = activeData();
     const request = chat.appearanceRequests.find(item => item.id === requestId);
     if (!request || request.type !== 'appearance_request') throw new Error('找不到有效的出场请求。');
@@ -1356,6 +1363,7 @@ function confirmTravelPlan(requestId) {
 
 // 推进已确认行程的游戏日进度，到达只标记待叙事确认，不自动同场。
 function advanceTravelPlans(world, chat) {
+    assertLegacyClock();
     const arrived = [];
     for (const plan of chat.travelPlans) {
         if (plan.npcIds.some(id => !activeNpc(world.catalog.npcs.find(npc => npc.id === id)))) {
@@ -1407,11 +1415,13 @@ function save() {
     if (typeof ctx.saveSettingsDebounced !== 'function') throw new Error('当前上下文缺少 saveSettingsDebounced。');
     const chat = ctx.extensionSettings[MODULE_NAME]?.worlds?.[worldId()]?.chats?.[chatId()];
     if (chat) {
+        if (!applyingWorldProjection) observeWorldProjection(chat);
         observeCanonFields(chat);
         chat.stateRevision = (safeInt(chat.stateRevision, 0, 0, 2147483646) + 1) % 2147483647;
     }
     revision++;
     ctx.saveSettingsDebounced();
+    if (!applyingWorldProjection && worldService) syncWorldPrompt();
 }
 
 // 使用 ST 原生扩展注入，将当前场景相关事件限制在最近三条和 300 字内。
@@ -1472,10 +1482,13 @@ function checkIdentity() {
     if (identity === currentIdentity) return false;
     currentIdentity = identity;
     revision++;
+    try { getCtx().setExtensionPrompt?.(WORLD_PROMPT_KEY, '', extension_prompt_types.IN_CHAT, 3, false, extension_prompt_roles.SYSTEM); } catch { /* 切卡先清同步注入。 */ }
     try { setPrompt(''); } catch (error) { console.warn('[NPC Life] 注入接口暂不可用，面板仍继续加载。', error); }
     const { world } = activeData();
     ensureCatalog(world);
     save();
+    if (worldService && rootSettings().preferences.autoMode === 'world' && !activeData().chat.timeline) worldService.resetBaseline();
+    syncWorldPrompt();
     render();
     return true;
 }
@@ -1792,12 +1805,135 @@ function npcLore(npc, budget) {
     return parts.filter(Boolean).join('\n\n').slice(0, budget);
 }
 
+// 检查旧版日推进入口，避免日级旅行与同步分钟时钟重复结算。
+function assertLegacyClock() {
+    if (rootSettings().preferences.autoMode === 'world') throw new Error('当前使用同步世界，请在动态页推进或校正正文时间；切回当前侧写模式后才能使用旧日模拟与旅行。');
+}
+
+// 提供同步世界的当前位置、同行与真实旅行耗时，模型不能指定抵达结果。
+function worldRules() {
+    const { world, chat } = activeData();
+    return { npcs: world.catalog.npcs, states: chat.npcStates, locations: world.catalog.locations,
+        parties: chat.parties, player: chat.player,
+        route: (from, to, ids) => {
+            const route = findRoute(world, from, to);
+            if (!route || !ids.length) return null;
+            const rates = ids.map(id => chat.npcStates[id]?.travelRate);
+            if (rates.some(rate => !Number.isFinite(rate) || rate <= 0)) return null;
+            return { durationMinutes: Math.max(1, Math.ceil(route.durationDays / Math.min(...rates) * 1440)) };
+        } };
+}
+
+// 解析本模块允许投影的字段父对象，同行地点也按稳定组ID条件撤销。
+function worldProjectionTarget(chat, path) {
+    if (path[0] === 'day') return chat;
+    if (path[0] === 'party') return chat.parties.find(party => party.id === path[1]);
+    return chat.npcStates[path[1]];
+}
+
+// 外部保存后解除已被人工或其他系统改动字段的同步世界所有权。
+function observeWorldProjection(chat) {
+    if (chat.timeline && chat.day !== chat.timeline.baseDay + Math.floor(chat.timeline.clockMinutes / 1440)) {
+        chat.timeline.pausedReason = '游戏日已被外部操作改变，请核对状态并重建同步世界基线。';
+    }
+    for (const [key, record] of Object.entries(chat.timelineOwners || {})) {
+        const path = JSON.parse(key);
+        const current = worldProjectionTarget(chat, path)?.[path.at(-1)];
+        const state = path[0] === 'npcStates' ? chat.npcStates[path[1]] : null;
+        if (JSON.stringify(current) !== record.serialized || (state && state.source !== 'simulation')) {
+            delete chat.timelineOwners[key];
+            if (chat.timeline) chat.timeline.pausedReason = '人物状态已被人工或正文事实更新，请检查计划并重建同步世界基线。';
+        }
+    }
+}
+
+// 将纯引擎结果一次性投影到动态状态，并记录可条件撤销的字段所有权。
+function commitWorldTurn(next, projections) {
+    const { chat } = activeData();
+    observeWorldProjection(chat);
+    if (chat.timeline?.pausedReason) throw new Error(chat.timeline.pausedReason);
+    const turn = next.turns.at(-1);
+    if (!turn) throw new Error('同步回合缺少来源事务。');
+    const updates = [...projections];
+    const affected = new Set(projections.map(item => item.npcId));
+    for (const id of affected) updates.push({ npcId: id, field: 'source', value: 'simulation' });
+    const day = next.baseDay + Math.floor(next.clockMinutes / 1440);
+    const entries = updates.map(item => ({ path: ['npcStates', item.npcId, item.field], value: item.value }));
+    for (const party of chat.parties) {
+        const moved = party.members.map(id => updates.find(item => item.npcId === id && item.field === 'locationId'));
+        if (moved.length && moved.every(Boolean) && new Set(moved.map(item => item.value)).size === 1) {
+            entries.push({ path: ['party', party.id, 'locationId'], value: moved[0].value });
+        }
+    }
+    entries.push({ path: ['day'], value: day });
+    chat.timelineOwners ||= {};
+    turn.projectionPatches = [];
+    const combined = new Map(entries.map(item => [JSON.stringify(item.path), item]));
+    for (const [key, item] of combined) {
+        const parent = worldProjectionTarget(chat, item.path);
+        if (!parent) throw new Error('同步回合包含未知角色投影。');
+        const field = item.path.at(-1);
+        turn.projectionPatches.push({ path: item.path, before: structuredClone(parent[field]),
+            beforeExists: Object.hasOwn(parent, field), after: structuredClone(item.value),
+            ownerBefore: structuredClone(chat.timelineOwners[key] || null), owner: turn.id });
+    }
+    for (const patch of turn.projectionPatches) {
+        const parent = worldProjectionTarget(chat, patch.path);
+        parent[patch.path.at(-1)] = structuredClone(patch.after);
+        chat.timelineOwners[JSON.stringify(patch.path)] = { owner: turn.id, serialized: JSON.stringify(patch.after) };
+    }
+    chat.timeline = next;
+    applyingWorldProjection = true;
+    try { save(); } finally { applyingWorldProjection = false; }
+    syncWorldPrompt(); render();
+}
+
+// 撤销本模块仍拥有的字段，保留人工校准；冲突时暂停而不恢复整份NPC状态。
+function rollbackWorldTurns(revokedTurns, next) {
+    const { chat } = activeData();
+    observeWorldProjection(chat);
+    let conflicts = 0;
+    for (const turn of [...revokedTurns].reverse()) for (const patch of [...(turn.projectionPatches || [])].reverse()) {
+        const key = JSON.stringify(patch.path), owner = chat.timelineOwners?.[key];
+        const parent = worldProjectionTarget(chat, patch.path);
+        const field = patch.path.at(-1);
+        if (!parent || owner?.owner !== patch.owner || JSON.stringify(parent[field]) !== JSON.stringify(patch.after)) { conflicts++; continue; }
+        if (patch.beforeExists) parent[field] = structuredClone(patch.before); else delete parent[field];
+        if (patch.ownerBefore) chat.timelineOwners[key] = patch.ownerBefore; else delete chat.timelineOwners[key];
+    }
+    if (conflicts) next.pausedReason = `撤销保留了 ${conflicts} 个后续或人工修改字段，请核对状态后重建基线。`;
+    if (conflicts) next.rollbackConflicts = [...(next.rollbackConflicts || []), { count: conflicts, reason: next.pausedReason }];
+    chat.timeline = next;
+    applyingWorldProjection = true;
+    try { save(); } finally { applyingWorldProjection = false; }
+    syncWorldPrompt(); render();
+}
+
+// 独立挂载玩家确知的同步结果，私密计划和心理不进入正文上下文。
+function syncWorldPrompt() {
+    const ctx = getCtx(), { chat } = activeData();
+    const text = rootSettings().preferences.autoMode === 'world' && chat.timeline && !chat.timeline.pausedReason
+        ? timelineContext(chat.timeline, worldRules(), 1200) : '';
+    ctx.setExtensionPrompt?.(WORLD_PROMPT_KEY, text, extension_prompt_types.IN_CHAT, 3, false, extension_prompt_roles.SYSTEM);
+}
+
+// 建立增量正文世界回合业务，不读取聊天文件或改写主聊天。
+function initializeWorldService() {
+    worldService = createWorldService({ data: activeData, identity: () => worldId() + '|' + chatId(),
+        sources: () => messageAnchors().map(({ key, content, role }) => ({ key, content, role })),
+        messageSignature: () => hashText(JSON.stringify(messageAnchors().map(item => item.key))),
+        request: (...args) => consoleFeatures.requestChecked(...args), rules: worldRules,
+        preferences: () => rootSettings().preferences, commit: commitWorldTurn, rollback: rollbackWorldTurns,
+        saveView: savePreferences, refresh: () => consoleView?.render(), id: newId, npcLore,
+    });
+}
+
 // 建立控制台适配器，UI保存和阅读/试聊保存不会改变世界状态版本。
 function initializeConsoleFeatures() {
     consoleFeatures = createConsoleFeatures({
         data: activeData, context: getCtx, identity: () => worldId() + '|' + chatId(),
         memoryApi: () => window.stMemoryEnhancement, npcLore, locationName, id: newId,
-        saveView: savePreferences, saveState: save, busy: () => busy,
+        saveView: savePreferences, saveState: save, busy: () => busy || (worldService?.busy?.() ?? false),
         transcript: () => recentChatText(10).slice(-6000),
         messageSignature: chatFingerprint,
         automationStatus: () => automationScheduler?.status(),
@@ -1810,8 +1946,14 @@ function initializeAutomation() {
     automationScheduler = createAutomationScheduler({
         context: getCtx, data: activeData, identity: () => worldId() + '|' + chatId(),
         preferences: () => rootSettings().preferences,
-        isBusy: () => busy || consoleFeatures.busy() || isGenerating(),
-        run: options => consoleFeatures.generateAutomaticNotes(options),
+        isBusy: () => busy || consoleFeatures.busy() || (worldService?.busy?.() ?? false) || isGenerating(),
+        run: options => {
+            if (rootSettings().preferences.autoMode !== 'world') return consoleFeatures.generateAutomaticNotes(options);
+            const { chat } = activeData();
+            if (chatId() === 'chat:unbound' || worldId() === 'world:unknown') throw new Error('当前没有稳定角色卡/聊天身份，同步世界暂停以避免串档。');
+            if (chat.travelPlans.some(plan => ['in_transit', 'arrival_ready'].includes(plan.status))) throw new Error('请先处理旧版未完成旅行，再启用同步世界，避免双重结算。');
+            return worldService.run(options);
+        },
         setEnabled: enabled => { rootSettings().preferences.autoEnabled = enabled === true; savePreferences(); },
         save: savePreferences, refresh: () => consoleView?.render(),
     });
@@ -1835,7 +1977,15 @@ function attachConsole() {
         generateDiary: (...args) => consoleFeatures.generateDiary(...args),
         sendChat: (...args) => consoleFeatures.sendChat(...args),
         clearChat: (...args) => consoleFeatures.clearChat(...args),
-        savePreferences: patch => { consoleFeatures.savePreferences(patch); automationScheduler?.tick(); },
+        savePreferences: patch => {
+            consoleFeatures.savePreferences(patch);
+            if (rootSettings().preferences.autoMode === 'world' && !activeData().chat.timeline) worldService.resetBaseline();
+            automationScheduler?.reset(); syncWorldPrompt(); automationScheduler?.tick();
+        },
+        confirmWorldTime: minutes => worldService.confirmTime(minutes),
+        rejectWorldTime: () => worldService.rejectTime(),
+        undoWorldTurn: () => worldService.undoLast(),
+        resetWorldBaseline: () => worldService.resetBaseline(),
         pauseAutomation: () => automationScheduler?.pause(),
         resetAutomation: () => automationScheduler?.reset(),
         importMap: value => consoleFeatures.importMap(value),
@@ -1908,7 +2058,7 @@ function addUI() {
     root.on('click.npcLife', '[data-export]', guarded(exportJson));
     root.on('click.npcLife', '[data-import]', guarded(() => root.find('[data-file]').trigger('click')));
     root.on('change.npcLife', '[data-file]', guarded(async function () { try { await importJson(this.files?.[0]); } finally { this.value = ''; } }));
-    root.on('change.npcLife', '[data-day]', guarded(function () { const { chat } = activeData(); chat.day = safeInt(this.value, chat.day, 1, 1000000); save(); render(); }));
+    root.on('change.npcLife', '[data-day]', guarded(function () { assertLegacyClock(); const { chat } = activeData(); chat.day = safeInt(this.value, chat.day, 1, 1000000); save(); render(); }));
     root.on('change.npcLife', '[data-player-location]', guarded(function () { const { world, chat } = activeData(); const location = confirmedLocation(world, this.value); if (!location) throw new Error('主角地点必须是已确认地点。'); chat.player.locationId = location.id; chat.player.scene = 'confirmed'; chat.player.locked = true; save(); syncPrompt(); render(); }));
     root.on('click.npcLife', '[data-apply-fact]', guarded(function () { const { chat } = activeData(); const fact = chat.pendingFacts.find(item => item.id === $(this).closest('[data-fact-id]').attr('data-fact-id')); if (fact) applyFact(fact); }));
     root.on('click.npcLife', '[data-reject-fact]', guarded(function () { rejectFact($(this).closest('[data-fact-id]').attr('data-fact-id')); }));
@@ -1919,8 +2069,8 @@ function addUI() {
         fact.manualRevoked = true;
         revokeCanonFact(chat, fact); setPrompt(''); save(); render();
     }));
-    root.on('click.npcLife', '[data-confirm-location-arrival]', guarded(function () { const { chat } = activeData(); const plan = chat.travelPlans.find(item => item.id === $(this).closest('[data-travel-id]').attr('data-travel-id')); if (!plan || plan.status !== 'arrival_ready' || plan.npcIds.some(id => !activeNpc(activeData().world.catalog.npcs.find(npc => npc.id === id)))) throw new Error('行程尚未抵达或角色已归档。'); if (!window.confirm(`确认旅行组抵达${locationName(activeData().world, plan.targetLocationId)}？这仅更新地点，不表示已经与主角见面。`)) return; for (const npcId of plan.npcIds) { const state = chat.npcStates[npcId]; state.locationId = plan.targetLocationId; state.source = 'simulation'; state.confidence = 1; state.updatedDay = chat.day; state.updatedAt = Date.now(); } plan.status = 'arrived'; plan.confirmedDay = chat.day; chat.stateRevision++; save(); render(); }));
-    root.on('click.npcLife', '[data-confirm-arrival]', guarded(function () { const { chat } = activeData(); const plan = chat.travelPlans.find(item => item.id === $(this).closest('[data-travel-id]').attr('data-travel-id')); if (!plan || plan.status !== 'arrival_ready' || plan.npcIds.some(id => !activeNpc(activeData().world.catalog.npcs.find(npc => npc.id === id))) || plan.targetLocationId !== chat.player.locationId) throw new Error('NPC 未抵达主角当前地点，不能确认为同场。'); if (!window.confirm('确认 NPC 已进入主角当前场景？这会记录为用户确认的剧情事实。')) return; for (const npcId of plan.npcIds) { const state = chat.npcStates[npcId]; state.locationId = plan.targetLocationId; state.scene = 'present'; state.source = 'manual'; state.confidence = 1; state.updatedDay = chat.day; state.updatedAt = Date.now(); } plan.status = 'scene_confirmed'; plan.sceneConfirmed = true; plan.confirmedDay = chat.day; chat.stateRevision++; addEvent(chat, { kind: 'manual', summary: `${plan.npcIds.join('、')} 经用户确认进入当前场景。`, npcIds: plan.npcIds, locationId: plan.targetLocationId, participants: plan.npcIds, source: 'manual' }); save(); syncPrompt(); render(); }));
+    root.on('click.npcLife', '[data-confirm-location-arrival]', guarded(function () { assertLegacyClock(); const { chat } = activeData(); const plan = chat.travelPlans.find(item => item.id === $(this).closest('[data-travel-id]').attr('data-travel-id')); if (!plan || plan.status !== 'arrival_ready' || plan.npcIds.some(id => !activeNpc(activeData().world.catalog.npcs.find(npc => npc.id === id)))) throw new Error('行程尚未抵达或角色已归档。'); if (!window.confirm(`确认旅行组抵达${locationName(activeData().world, plan.targetLocationId)}？这仅更新地点，不表示已经与主角见面。`)) return; for (const npcId of plan.npcIds) { const state = chat.npcStates[npcId]; state.locationId = plan.targetLocationId; state.source = 'simulation'; state.confidence = 1; state.updatedDay = chat.day; state.updatedAt = Date.now(); } plan.status = 'arrived'; plan.confirmedDay = chat.day; chat.stateRevision++; save(); render(); }));
+    root.on('click.npcLife', '[data-confirm-arrival]', guarded(function () { assertLegacyClock(); const { chat } = activeData(); const plan = chat.travelPlans.find(item => item.id === $(this).closest('[data-travel-id]').attr('data-travel-id')); if (!plan || plan.status !== 'arrival_ready' || plan.npcIds.some(id => !activeNpc(activeData().world.catalog.npcs.find(npc => npc.id === id))) || plan.targetLocationId !== chat.player.locationId) throw new Error('NPC 未抵达主角当前地点，不能确认为同场。'); if (!window.confirm('确认 NPC 已进入主角当前场景？这会记录为用户确认的剧情事实。')) return; for (const npcId of plan.npcIds) { const state = chat.npcStates[npcId]; state.locationId = plan.targetLocationId; state.scene = 'present'; state.source = 'manual'; state.confidence = 1; state.updatedDay = chat.day; state.updatedAt = Date.now(); } plan.status = 'scene_confirmed'; plan.sceneConfirmed = true; plan.confirmedDay = chat.day; chat.stateRevision++; addEvent(chat, { kind: 'manual', summary: `${plan.npcIds.join('、')} 经用户确认进入当前场景。`, npcIds: plan.npcIds, locationId: plan.targetLocationId, participants: plan.npcIds, source: 'manual' }); save(); syncPrompt(); render(); }));
     root.on('click.npcLife', '[data-evaluate-motivation]', guarded(function () { return evaluateRequestMotivation($(this).closest('[data-request-id]').attr('data-request-id')); }));
     root.on('click.npcLife', '[data-confirm-travel]', guarded(function () { confirmTravelPlan($(this).closest('[data-request-id]').attr('data-request-id')); status('旅行计划已排期；抵达前不会把 NPC 标为在场。'); }));
     root.on('click.npcLife', '[data-apply-state-edit]', guarded(function () { applyStateEdit($(this).closest('[data-request-id]').attr('data-request-id')); }));
@@ -1947,14 +2097,15 @@ function init() {
         settingsGlobalCleanup = null;
         rootSettings();
         initializeConsoleFeatures();
+        initializeWorldService();
         addUI();
         attachConsole();
         checkIdentity();
         initializeAutomation();
         render();
-        const onChange = () => { try { if (!checkIdentity()) { const { world, chat } = activeData(); if (revokeMissingCanonFacts(world, chat)) { save(); render(); } } automationScheduler?.tick(); } catch (error) { console.error('[NPC Life]', error); } };
+        const onChange = () => { try { if (!checkIdentity()) { const { world, chat } = activeData(); if (revokeMissingCanonFacts(world, chat)) { save(); render(); } } if (rootSettings().preferences.autoMode === 'world') worldService?.reconcile(); automationScheduler?.tick(); } catch (error) { console.error('[NPC Life]', error); } };
         pollTimer = setInterval(onChange, 700);
-        window.__npcLifeRpgCleanup = () => { clearInterval(pollTimer); revision++; try { setPrompt(''); } catch { /* 注入接口不可用时仍清理 UI */ } automationScheduler?.destroy(); automationScheduler = null; consoleFeatures?.destroy(); consoleView?.destroy(); consoleView = null; $(ROOT).off('.npcLife').remove(); $('#npc-life-extension-launcher').remove(); settingsGlobalCleanup?.(); settingsGlobalCleanup = null; };
+        window.__npcLifeRpgCleanup = () => { clearInterval(pollTimer); revision++; try { setPrompt(''); } catch { /* 注入接口不可用时仍清理 UI */ } automationScheduler?.destroy(); automationScheduler = null; worldService?.destroy?.(); worldService = null; try { getCtx().setExtensionPrompt?.(WORLD_PROMPT_KEY, '', extension_prompt_types.IN_CHAT, 3, false, extension_prompt_roles.SYSTEM); } catch { /* 清理同步注入。 */ } consoleFeatures?.destroy(); consoleView?.destroy(); consoleView = null; $(ROOT).off('.npcLife').remove(); $('#npc-life-extension-launcher').remove(); settingsGlobalCleanup?.(); settingsGlobalCleanup = null; };
     } catch (error) {
         console.error('[NPC Life] 初始化失败', error);
         window.alert(`NPC Life 初始化失败：${error?.message ?? error}`);

@@ -1,6 +1,6 @@
 # 测试说明
 
-版本目标：`3.0.0-beta.3`，运行环境：SillyTavern `1.17.0`。
+版本目标：`3.0.0-beta.4`，运行环境：SillyTavern `1.17.0`。
 
 ## 本地自动回归
 
@@ -10,6 +10,7 @@
 node tests/core.test.mjs
 node --test tests/services.test.mjs
 node --test tests/automation.test.mjs tests/integration.test.mjs
+node --test tests/timeline.test.mjs tests/world-service.test.mjs tests/world-integration.test.mjs
 ```
 
 UI 测试需开发环境安装 `happy-dom`；启用真实布局检查还需 `playwright` 和本机 Edge。通过 `ST_ROOT` 指向本机 SillyTavern 源目录，用于读取宿主随附 jQuery：
@@ -29,7 +30,7 @@ ST_ROOT=/path/to/SillyTavern UI_LAYOUT=1 node --test tests/console.test.mjs
 
 ### 浏览器 UI 测试
 
-安装包含以下 7 个运行文件：`index.js`、`style.css`、`console.js`、`console.css`、`services.js`、`automation.js`、`manifest.json`。在浏览器加载扩展后执行 `Ctrl+F5`，确认扩展设置可打开，五页手机式控制台可切换，版本条诊断显示 `3.0.0-beta.3`。`services.js` 的职责包括 API 分流、只读记忆、独立后台试聊和地图导入。
+安装包含以下 9 个运行文件：`index.js`、`style.css`、`console.js`、`console.css`、`services.js`、`automation.js`、`timeline.js`、`world-service.js`、`manifest.json`。在浏览器加载扩展后执行 `Ctrl+F5`，确认扩展设置可打开，五页手机式控制台可切换，版本条诊断显示 `3.0.0-beta.4`。`services.js` 的职责包括 API 分流、只读记忆、独立后台试聊和地图导入。
 
 逐项检查：
 
@@ -40,6 +41,15 @@ ST_ROOT=/path/to/SillyTavern UI_LAYOUT=1 node --test tests/console.test.mjs
 - 设置变更重新加载后仍可从 `extensionSettings['npc-life']` 恢复；界面布局从 `localStorage` 恢复。
 - 关闭记忆增强开关时不读取记忆表；开启后只检查当前聊天最近非用户消息、关键词和行预算行为。
 - 未确认地点、未知解析结果和过期记忆不会覆盖当前状态。
+
+## 同步世界回归
+
+- 0分钟创建90分钟计划但不完成，之后60+30分钟跨轮结算；所有旧计划同步推进，新计划不倒算；路线分钟取已确认耗时和慢成员能力。
+- 不完整同行组、未知地点/路线、在场后台移动、锁定活动阻断；只接受有限中性动作模板，模型不能直接写任意新事实。
+- 时间必须原文证据与本地时长解析一致，否定/未来/引用/模糊片刻待审核；人工可确认0–10080整数分钟。
+- 来源编辑撤第一个受影响回合及依赖后缀；重复检测不反复保存；day/人工同值/正史校准保留，外部变化暂停而不是整档回滚。
+- 真实服务队列+世界业务+纯引擎组合验证 knownEventIds、用户取消和在途守卫；同场已知结果才进入timelineContext，远处及停用人物不输出。
+- world模式旧日模拟和旅行入口拒绝；九运行文件完整、默认notes模式、不自动补跑旧历史。
 
 ## 自动与连接入口回归
 

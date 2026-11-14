@@ -15,7 +15,7 @@ export function normalizeConsolePreferences(value = {}) {
         contextChars: integer(value.contextChars, 6000, 1000, 16000), memoryEnabled: value.memoryEnabled === true,
         memoryChars: integer(value.memoryChars, 1600, 200, 4000), secondaryProfileId: text(value.secondaryProfileId),
         maxTokens: integer(value.maxTokens, 2048, 256, 8192), autoEnabled: value.autoEnabled === true,
-        autoEveryReplies: integer(value.autoEveryReplies, 5, 1, 100), routes, templates };
+        autoEveryReplies: integer(value.autoEveryReplies, 5, 1, 100), autoMode: value.autoMode === 'world' ? 'world' : 'notes', routes, templates };
 }
 
 // 从已安装增强记忆插件读取当前聊天表格，始终只读且不做跨聊天缓存。
@@ -205,6 +205,8 @@ export function createConsoleFeatures(host) {
     };
     return {
         request,
+        // 世界业务使用内部守卫，在串行队列真正发送前再次拒绝过期请求。
+        requestChecked: (system, prompt, task, checkCurrent) => enqueueRequest(system, prompt, task, { checkCurrent }),
         busy: () => working > 0,
         profiles, memory, relevant,
         // 只测试已选副 profile，不写入剧情、不切换主连接，也不静默 fallback。
@@ -387,6 +389,7 @@ export function createConsoleFeatures(host) {
                     tags: Array.isArray(item.tags) ? item.tags : [], x: item.x, y: item.y })),
                 routes: world.catalog.routes, events: chat.events, diaries: chat.diaries, conversations: chat.conversations,
                 autoNotes: Array.isArray(chat.autoNotes) ? chat.autoNotes : [],
+                timeline: chat.timeline || null,
                 automation: host.automationStatus?.() ?? { enabled: prefs().autoEnabled, status: 'idle' },
                 preferences: prefs(), ...profileData, memory: prefs().memoryEnabled ? memory() : { available: false, tables: [], message: '记忆联动已关闭。' },
                 mapImage: validMapImage(world.catalog.mapImage) ? world.catalog.mapImage : '', busy: working > 0 || host.busy() };

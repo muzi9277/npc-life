@@ -81,6 +81,15 @@
 .nlc-connection-guide li { margin:6px 0; }
 #npc-life-console .nlc-auto-note p { white-space:pre-wrap; }
 #npc-life-console [data-automation-status] { white-space:pre-wrap; }
+#npc-life-console h4 { margin:13px 0 7px; font-size:.95em; }
+#npc-life-console .nlc-world-clock { font-weight:600; font-variant-numeric:tabular-nums; }
+#npc-life-console .nlc-world-review { min-width:0; padding:10px; margin:10px 0; border:1px solid var(--nlc-border); border-radius:9px; background:var(--nlc-soft); }
+#npc-life-console .nlc-world-plans, #npc-life-console [data-world-turns], #npc-life-console [data-world-events] { min-width:0; }
+#npc-life-console .nlc-world-steps { padding-left:22px; margin:8px 0 0; }
+#npc-life-console .nlc-world-steps li { margin:7px 0; overflow-wrap:anywhere; }
+#npc-life-console .nlc-world-steps small { display:block; opacity:.72; }
+#npc-life-console .nlc-world-plan p, #npc-life-console [data-time-evidence] { white-space:pre-wrap; }
+#npc-life-console .nlc-world-actions { align-items:stretch; }
 .nlc-body-entry { position:fixed; z-index:10039; right:14px; bottom:14px; box-shadow:0 3px 12px rgba(0,0,0,.25); }
 #npc-life-console.is-minimized { height:46px !important; min-height:0; resize:none !important; }
 #npc-life-console.is-minimized .nlc-tabs, #npc-life-console.is-minimized .nlc-status, #npc-life-console.is-minimized .nlc-pages { display:none; }

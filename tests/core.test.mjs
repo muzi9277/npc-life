@@ -24,11 +24,12 @@ const names = [
     'findRoute', 'validateTransition', 'evaluateAppearanceRequest', 'evaluateRequestMotivation', 'confirmTravelPlan',
     'advanceTravelPlans', 'commitGameDay', 'validateSimulationEvents', 'simulateDay',
     'generateSceneGestures', 'checkIdentity', 'syncPrompt', 'setManualNpcLocation', 'openConnectionManager',
+    'worldRules', 'commitWorldTurn', 'rollbackWorldTurns', 'observeWorldProjection', 'assertLegacyClock', 'syncWorldPrompt',
 ];
 const loadCore = new Function('environment', `
     const { SillyTavern, $, jQuery, extension_prompt_types, extension_prompt_roles,
         document, window, normalizeConsolePreferences, mockConsoleFeatures, mountConsole,
-        createConsoleFeatures, fetch, setInterval } = environment;
+        createConsoleFeatures, timelineContext, fetch, setInterval } = environment;
     ${source}
     return { ${names.join(', ')} };
 `);
@@ -43,7 +44,7 @@ function deferred() {
 }
 
 function fixture() {
-    const calls = { requests: [], saves: 0, prompts: [] };
+    const calls = { requests: [], saves: 0, prompts: [], timelineContexts: [] };
     const ctx = {
         extensionSettings: {}, characterId: 0, chatId: 'chat-a', name1: '沈遥', chat: [],
         characters: [
@@ -88,6 +89,10 @@ function fixture() {
         // Confirmation belongs to UI. Calling archive/restore directly needs none.
         window: { confirm: forbidden('core confirmation'), alert: forbidden('alert') },
         normalizeConsolePreferences, mockConsoleFeatures,
+        timelineContext: (...args) => {
+            calls.timelineContexts.push(args);
+            return `mock world context:${args[0].turns.at(-1)?.id || 'baseline'}`;
+        },
         mountConsole: forbidden('console mount'), createConsoleFeatures: forbidden('real generation service'),
         fetch: forbidden('network fetch'), setInterval: forbidden('init timer'),
     });
@@ -767,6 +772,299 @@ test('connection manager navigation opens only the verified drawer and leaves co
     assert.deepEqual(f.ctx.extensionSettings, before);
     document.getElementById = () => null;
     assert.throws(open, /连接管理器未加载或已禁用/);
+});
+
+// Adapter tests run real index state/save/render code. Engine/service decisions are
+// supplied as plain transactions; timelineContext alone is a presentation mock.
+function worldFixture() {
+    const f = fixture();
+    f.store.preferences.autoMode = 'world';
+    return f;
+}
+function worldNext(f, id, clockMinutes = 1440) {
+    return { ...(f.chat.timeline || { baseDay: f.chat.day, clockMinutes: 0, turns: [] }),
+        clockMinutes, turns: [...(f.chat.timeline?.turns || []), { id }] };
+}
+const projection = (f, field, value) => ({ npcId: f.npc.id, field, value });
+const patchFor = (turn, ...path) => turn.projectionPatches.find(patch => JSON.stringify(patch.path) === field(...path));
+
+test('world commit projects once, deduplicates paths, records independent patches and saves/prompts once', () => {
+    const f = worldFixture(), state = f.chat.npcStates[f.npc.id];
+    const before = structuredClone(state), next = worldNext(f, 'turn:A', 1500);
+    const nested = { value: 'friend', note: '投影关系', source: 'simulation' };
+    const input = [projection(f, 'locationId', f.south.id), projection(f, 'activity', '中间活动'),
+        projection(f, 'activity', '最终活动'), projection(f, 'relationship', nested)];
+    const inputBefore = structuredClone(input), revision = f.chat.stateRevision;
+    f.api.commitWorldTurn(next, input);
+    const turn = next.turns.at(-1);
+    assert.equal(f.chat.timeline, next);
+    assert.equal(state.locationId, f.south.id); assert.equal(state.activity, '最终活动');
+    assert.equal(state.source, 'simulation'); assert.equal(f.chat.day, 2);
+    assert.deepEqual(input, inputBefore);
+    assert.equal(f.chat.stateRevision, revision + 1); assert.equal(f.calls.saves, 1);
+    assert.equal(f.calls.prompts.length, 1); assert.equal(f.calls.timelineContexts.length, 1);
+    assert.equal(f.calls.prompts[0][1], 'mock world context:turn:A');
+    assert.equal(f.calls.timelineContexts[0][0], next); assert.equal(f.calls.timelineContexts[0][2], 1200);
+    assert.equal(turn.projectionPatches.length, 5, 'three projected fields, source, and day each own one patch');
+    for (const key of ['locationId', 'activity', 'relationship', 'source']) {
+        const patch = patchFor(turn, 'npcStates', f.npc.id, key);
+        assert.deepEqual(patch.before, before[key]); assert.equal(patch.beforeExists, true);
+        assert.equal(patch.owner, turn.id); assert.equal(patch.ownerBefore, null);
+        assert.deepEqual(f.chat.timelineOwners[field(...patch.path)], { owner: turn.id, serialized: JSON.stringify(patch.after) });
+    }
+    assert.equal(patchFor(turn, 'day').before, 1); assert.equal(patchFor(turn, 'day').after, 2);
+    nested.note = '外部修改输入';
+    assert.equal(state.relationship.note, '投影关系');
+    state.relationship.note = '修改当前状态';
+    assert.equal(patchFor(turn, 'npcStates', f.npc.id, 'relationship').after.note, '投影关系');
+});
+
+test('world commit projects a complete moving party location and rollback restores the party location', () => {
+    const f = worldFixture();
+    const party = { id: 'party:traveling', members: [f.npc.id, f.friend.id], locationId: f.north.id,
+        source: 'simulation', confirmed: true };
+    f.chat.parties.push(party);
+    const next = worldNext(f, 'turn:party', 1440);
+    f.api.commitWorldTurn(next, [
+        { npcId: f.npc.id, field: 'locationId', value: f.south.id },
+        { npcId: f.friend.id, field: 'locationId', value: f.south.id },
+    ]);
+    const turn = next.turns.at(-1);
+    const partyPatch = patchFor(turn, 'party', party.id, 'locationId');
+    assert.ok(partyPatch, 'complete party movement records a party location patch');
+    assert.equal(partyPatch.before, f.north.id); assert.equal(partyPatch.after, f.south.id);
+    assert.equal(party.locationId, f.south.id);
+    assert.equal(f.chat.npcStates[f.npc.id].locationId, party.locationId);
+    assert.equal(f.chat.npcStates[f.friend.id].locationId, party.locationId);
+    assert.equal(f.chat.timelineOwners[field('party', party.id, 'locationId')].owner, turn.id);
+    f.api.rollbackWorldTurns([turn], { baseDay: 1, clockMinutes: 0, turns: [] });
+    assert.equal(party.locationId, f.north.id, 'undo restores the party location alongside member locations');
+    assert.equal(f.chat.npcStates[f.npc.id].locationId, f.north.id);
+    assert.equal(f.chat.npcStates[f.friend.id].locationId, f.north.id);
+    assert.equal(f.chat.timelineOwners[field('party', party.id, 'locationId')], undefined);
+});
+
+test('world commit requires a source turn before any projected state/save/prompt mutation', () => {
+    const f = worldFixture(), before = structuredClone(f.chat);
+    assert.throws(() => f.api.commitWorldTurn({ baseDay: 1, clockMinutes: 1440, turns: [] },
+        [projection(f, 'locationId', f.south.id)]), /来源事务/);
+    assert.deepEqual(f.chat, before); assert.equal(f.calls.saves, 0); assert.equal(f.calls.prompts.length, 0);
+});
+
+test('world ownership A → B rolls back B to A, then A to baseline, including same-value source/day ownership', () => {
+    const f = worldFixture(), initial = structuredClone(f.chat.npcStates[f.npc.id]);
+    const a = worldNext(f, 'turn:A');
+    f.api.commitWorldTurn(a, [projection(f, 'locationId', f.south.id), projection(f, 'activity', 'A 活动')]);
+    const aState = structuredClone(f.chat.npcStates[f.npc.id]);
+    const b = worldNext(f, 'turn:B');
+    f.api.commitWorldTurn(b, [projection(f, 'locationId', f.north.id), projection(f, 'activity', 'B 活动')]);
+    for (const path of [['npcStates', f.npc.id, 'source'], ['day']]) {
+        const patch = patchFor(b.turns.at(-1), ...path);
+        assert.deepEqual(patch.before, patch.after, 'same-value writes still transfer ownership');
+        assert.equal(patch.ownerBefore.owner, 'turn:A');
+        assert.equal(f.chat.timelineOwners[field(...path)].owner, 'turn:B');
+    }
+    f.api.rollbackWorldTurns([b.turns.at(-1)], a);
+    assert.deepEqual(f.chat.npcStates[f.npc.id], aState); assert.equal(f.chat.day, 2);
+    assert.equal(a.pausedReason, undefined);
+    assert.ok(Object.values(f.chat.timelineOwners).every(owner => owner.owner === 'turn:A'));
+    const baseline = { baseDay: 1, clockMinutes: 0, turns: [] };
+    f.api.rollbackWorldTurns(a.turns, baseline);
+    assert.deepEqual(f.chat.npcStates[f.npc.id], initial); assert.equal(f.chat.day, 1);
+    assert.deepEqual(f.chat.timelineOwners, {}); assert.equal(baseline.pausedReason, undefined);
+});
+
+test('world suffix rollback reverses A → B together and deletes fields that did not exist at baseline', () => {
+    const f = worldFixture(), initial = structuredClone(f.chat.npcStates[f.npc.id]);
+    const a = worldNext(f, 'turn:A');
+    f.api.commitWorldTurn(a, [projection(f, 'activity', 'A'), projection(f, 'adapterOnly', { tag: 'A' })]);
+    assert.equal(patchFor(a.turns[0], 'npcStates', f.npc.id, 'adapterOnly').beforeExists, false);
+    const b = worldNext(f, 'turn:B', 2880);
+    f.api.commitWorldTurn(b, [projection(f, 'activity', 'B'), projection(f, 'adapterOnly', { tag: 'B' })]);
+    const baseline = { baseDay: 1, clockMinutes: 0, turns: [] };
+    const order = b.turns.map(turn => turn.id);
+    f.api.rollbackWorldTurns(b.turns, baseline);
+    assert.deepEqual(b.turns.map(turn => turn.id), order, 'rollback must not reverse the transaction input in place');
+    assert.deepEqual(f.chat.npcStates[f.npc.id], initial); assert.equal(f.chat.day, 1);
+    assert.equal(Object.hasOwn(f.chat.npcStates[f.npc.id], 'adapterOnly'), false);
+    assert.deepEqual(f.chat.timelineOwners, {}); assert.equal(baseline.pausedReason, undefined);
+});
+
+for (const saved of [false, true]) test(`world rollback preserves same-value manual location/source (saved=${saved}) and pauses injection`, () => {
+    const f = worldFixture(), state = f.chat.npcStates[f.npc.id];
+    const next = worldNext(f, 'turn:A');
+    f.api.commitWorldTurn(next, [projection(f, 'locationId', f.south.id)]);
+    if (saved) f.api.setManualNpcLocation(f.npc.id, f.south.id);
+    else state.source = 'manual'; // Pending external edit is also detected by rollback's observation.
+    const manualState = structuredClone(state), baseline = { baseDay: 1, clockMinutes: 0, turns: [] };
+    f.api.rollbackWorldTurns(next.turns, baseline);
+    assert.deepEqual(state, manualState, 'manual confirmation of the same value must not revive the old location/source');
+    assert.equal(state.locationId, f.south.id); assert.equal(state.source, 'manual');
+    assert.equal(f.chat.day, 1, 'independently owned day can still revert');
+    assert.equal(f.chat.timelineOwners[field('npcStates', f.npc.id, 'locationId')], undefined);
+    assert.match(baseline.pausedReason, /人工|后续/);
+    assert.deepEqual(baseline.rollbackConflicts, [{ count: 2, reason: baseline.pausedReason }]);
+    assert.equal(f.calls.prompts.at(-1)[1], '');
+    assert.equal(f.calls.timelineContexts.length, 1, 'paused rollback must not compute injectable world context');
+});
+
+for (const source of ['manual', 'canon']) test(`world commit rejects intervening unsaved same-value ${source} ownership before B can overwrite it`, () => {
+    const f = worldFixture(), state = f.chat.npcStates[f.npc.id];
+    const a = worldNext(f, 'turn:A');
+    f.api.commitWorldTurn(a, [projection(f, 'locationId', f.south.id)]);
+    state.source = source; // Same-value external confirmation before its own save.
+    const retained = structuredClone(state), b = worldNext(f, 'turn:B', 2880);
+    const saves = f.calls.saves, prompts = f.calls.prompts.length;
+    assert.throws(() => f.api.commitWorldTurn(b, [projection(f, 'locationId', f.north.id)]), /基线|人工|正文/);
+    assert.deepEqual(state, retained); assert.equal(f.chat.timeline, a);
+    assert.equal(f.chat.day, 2); assert.equal(f.calls.saves, saves); assert.equal(f.calls.prompts.length, prompts);
+    assert.equal(b.turns.at(-1).projectionPatches, undefined);
+    assert.equal(f.chat.timelineOwners[field('npcStates', f.npc.id, 'locationId')], undefined);
+    const baseline = { baseDay: 1, clockMinutes: 0, turns: [] };
+    f.api.rollbackWorldTurns(a.turns, baseline);
+    assert.deepEqual(state, retained, 'revoking A must retain the intervening external destination and source');
+    assert.match(baseline.pausedReason, /人工|后续/);
+});
+
+test('world observation releases only changed owned fields; rollback preserves unrelated state, history and party/player edits', () => {
+    const f = worldFixture(), state = f.chat.npcStates[f.npc.id];
+    const next = worldNext(f, 'turn:A');
+    f.api.commitWorldTurn(next, [projection(f, 'locationId', f.south.id), projection(f, 'activity', '投影活动')]);
+    state.activity = '外部活动'; state.relationship = { value: 'friend', note: '保留', source: 'manual' };
+    f.chat.player.locationId = f.south.id;
+    f.chat.parties.push({ id: 'manual-party', members: [f.friend.id], locationId: f.north.id });
+    f.chat.events.push({ id: 'independent-event', summary: '保留历史' });
+    f.chat.diaries.push({ id: 'independent-diary', npcId: f.npc.id, text: '保留日记' });
+    f.chat.conversations[f.npc.id] = [{ role: 'user', content: '保留试聊' }];
+    f.chat.npcStates[f.friend.id].activity = '无关 NPC 活动';
+    f.api.save();
+    assert.equal(f.chat.timelineOwners[field('npcStates', f.npc.id, 'activity')], undefined);
+    assert.equal(f.chat.timelineOwners[field('npcStates', f.npc.id, 'locationId')].owner, 'turn:A');
+    const keep = structuredClone({ player: f.chat.player, parties: f.chat.parties, events: f.chat.events,
+        diaries: f.chat.diaries, conversations: f.chat.conversations, friend: f.chat.npcStates[f.friend.id], relationship: state.relationship });
+    f.api.rollbackWorldTurns(next.turns, { baseDay: 1, clockMinutes: 0, turns: [] });
+    assert.equal(state.locationId, f.north.id); assert.equal(state.source, 'story');
+    assert.equal(state.activity, '外部活动');
+    assert.deepEqual({ player: f.chat.player, parties: f.chat.parties, events: f.chat.events,
+        diaries: f.chat.diaries, conversations: f.chat.conversations, friend: f.chat.npcStates[f.friend.id], relationship: state.relationship }, keep);
+});
+
+test('world rollback protects later saved day, including ABA back to the projected value', () => {
+    for (const aba of [false, true]) {
+        const f = worldFixture(), next = worldNext(f, 'turn:A', 2880);
+        f.api.commitWorldTurn(next, [projection(f, 'activity', '投影活动')]);
+        assert.equal(f.chat.day, 3);
+        f.chat.day = 19; f.api.save();
+        if (aba) { f.chat.day = 3; f.api.save(); }
+        const expectedDay = f.chat.day, baseline = { baseDay: 1, clockMinutes: 0, turns: [] };
+        assert.equal(f.chat.timelineOwners[field('day')], undefined);
+        f.api.rollbackWorldTurns(next.turns, baseline);
+        assert.equal(f.chat.day, expectedDay, 'later day calibration must never restore the old day');
+        assert.equal(f.chat.npcStates[f.npc.id].activity, '原活动');
+        assert.match(baseline.pausedReason, /人工|后续/);
+    }
+});
+
+for (const saved of [false, true]) test(`world commit refuses externally calibrated day before overwriting it (saved=${saved})`, () => {
+    const f = worldFixture(), a = worldNext(f, 'turn:A');
+    f.api.commitWorldTurn(a, [projection(f, 'activity', 'A 活动')]);
+    f.chat.day = 17;
+    if (saved) f.api.save();
+    const state = structuredClone(f.chat.npcStates), saves = f.calls.saves;
+    const b = worldNext(f, 'turn:B', 2880);
+    assert.throws(() => f.api.commitWorldTurn(b, [projection(f, 'activity', 'B 活动')]), /游戏日|基线/);
+    assert.equal(f.chat.day, 17); assert.deepEqual(f.chat.npcStates, state);
+    assert.equal(f.chat.timeline, a); assert.equal(f.calls.saves, saves);
+    assert.equal(f.chat.timelineOwners[field('day')], undefined);
+    assert.equal(b.turns.at(-1).projectionPatches, undefined);
+});
+
+test('world rollback of earlier A retains still-owned B and reports conflicts rather than undoing B', () => {
+    const f = worldFixture(), a = worldNext(f, 'turn:A');
+    f.api.commitWorldTurn(a, [projection(f, 'activity', 'A 活动')]);
+    const b = worldNext(f, 'turn:B', 2880);
+    f.api.commitWorldTurn(b, [projection(f, 'activity', 'B 活动')]);
+    const state = structuredClone(f.chat.npcStates), owners = structuredClone(f.chat.timelineOwners);
+    const remaining = { ...b, turns: [b.turns.at(-1)] };
+    f.api.rollbackWorldTurns(a.turns, remaining);
+    assert.deepEqual(f.chat.npcStates, state); assert.deepEqual(f.chat.timelineOwners, owners);
+    assert.equal(f.chat.day, 3); assert.match(remaining.pausedReason, /后续/);
+    assert.deepEqual(remaining.rollbackConflicts, [{ count: 3, reason: remaining.pausedReason }]);
+    assert.equal(f.calls.prompts.at(-1)[1], '');
+});
+
+test('world commit and rollback isolate another chat, including owners, prompt identity and timeline', () => {
+    const f = worldFixture(), a = worldNext(f, 'turn:A');
+    f.api.commitWorldTurn(a, [projection(f, 'locationId', f.south.id)]);
+    const firstBefore = structuredClone(f.chat);
+    f.ctx.chatId = 'chat-peer';
+    const peer = f.api.activeData().chat;
+    f.api.activeData();
+    assert.notEqual(peer, f.chat); assert.equal(peer.timeline, undefined);
+    assert.equal(peer.timelineOwners, undefined);
+    const peerNext = { baseDay: peer.day, clockMinutes: 4320, turns: [{ id: 'turn:peer' }] };
+    f.api.commitWorldTurn(peerNext, [projection(f, 'activity', '另一个聊天的活动')]);
+    const peerBefore = structuredClone(peer);
+    assert.deepEqual(f.chat, firstBefore);
+    f.ctx.chatId = 'chat-a';
+    f.api.checkIdentity();
+    assert.equal(f.calls.prompts.at(-1)[1], 'mock world context:turn:A');
+    f.api.rollbackWorldTurns(a.turns, { baseDay: 1, clockMinutes: 0, turns: [] });
+    assert.equal(f.chat.npcStates[f.npc.id].locationId, f.north.id);
+    assert.deepEqual(peer, peerBefore);
+    f.ctx.chatId = 'chat-peer'; f.api.checkIdentity();
+    assert.equal(f.calls.prompts.at(-1)[1], 'mock world context:turn:peer');
+});
+
+test('world prompt clears when paused, disabled or absent and restores only the current active timeline', () => {
+    const f = worldFixture();
+    f.api.syncWorldPrompt(); assert.equal(f.calls.prompts.at(-1)[1], '');
+    assert.equal(f.calls.timelineContexts.length, 0);
+    const next = worldNext(f, 'turn:A', 0);
+    f.api.commitWorldTurn(next, []);
+    assert.equal(f.calls.prompts.at(-1)[1], 'mock world context:turn:A');
+    next.pausedReason = '需要核对'; f.api.syncWorldPrompt();
+    assert.equal(f.calls.prompts.at(-1)[1], '');
+    delete next.pausedReason; f.store.preferences.autoMode = 'notes'; f.api.syncWorldPrompt();
+    assert.equal(f.calls.prompts.at(-1)[1], ''); assert.equal(f.calls.timelineContexts.length, 1);
+    f.store.preferences.autoMode = 'world'; f.api.syncWorldPrompt();
+    assert.equal(f.calls.prompts.at(-1)[1], 'mock world context:turn:A');
+    assert.equal(f.calls.timelineContexts.length, 2);
+});
+
+test('worldRules exposes current chat state and confirmed directed travel time at the slowest NPC rate', () => {
+    const f = worldFixture(); route(f, 3);
+    f.chat.npcStates[f.npc.id].travelRate = 2; f.chat.npcStates[f.friend.id].travelRate = 0.5;
+    const rules = f.api.worldRules();
+    assert.equal(rules.npcs, f.world.catalog.npcs); assert.equal(rules.states, f.chat.npcStates);
+    assert.equal(rules.locations, f.world.catalog.locations); assert.equal(rules.parties, f.chat.parties);
+    assert.equal(rules.player, f.chat.player);
+    assert.deepEqual(rules.route(f.north.id, f.south.id, [f.npc.id]), { durationMinutes: 2160 });
+    assert.deepEqual(rules.route(f.north.id, f.south.id, [f.npc.id, f.friend.id]), { durationMinutes: 8640 });
+    assert.equal(rules.route(f.south.id, f.north.id, [f.npc.id]), null);
+    assert.equal(rules.route(f.north.id, f.south.id, []), null);
+    assert.equal(rules.route(f.north.id, f.south.id, ['npc:absent']), null);
+    for (const rate of [null, 0, -1, NaN]) {
+        f.chat.npcStates[f.npc.id].travelRate = rate;
+        assert.equal(rules.route(f.north.id, f.south.id, [f.npc.id]), null);
+    }
+});
+
+for (const entry of ['simulateDay', 'confirmTravelPlan', 'advanceTravelPlans']) test(`world mode rejects legacy ${entry} before mutation, save or generation`, async () => {
+    const f = worldFixture(); route(f);
+    const request = { id: 'legacy-request', type: 'appearance_request', npcId: f.npc.id,
+        targetLocationId: f.south.id, motivationDecision: 'accept', stateRevision: f.chat.stateRevision };
+    f.chat.appearanceRequests.push(request);
+    f.chat.travelPlans.push({ id: 'legacy-plan', npcIds: [f.npc.id], targetLocationId: f.south.id,
+        lastProgressDay: 0, arrivalDay: 1, status: 'in_transit' });
+    const before = structuredClone(f.chat), revision = f.chat.stateRevision;
+    if (entry === 'simulateDay') await assert.rejects(f.api.simulateDay(), /同步世界/);
+    if (entry === 'confirmTravelPlan') assert.throws(() => f.api.confirmTravelPlan(request.id), /同步世界/);
+    if (entry === 'advanceTravelPlans') assert.throws(() => f.api.advanceTravelPlans(f.world, f.chat), /同步世界/);
+    assert.deepEqual(f.chat, before); assert.equal(f.chat.stateRevision, revision);
+    assert.equal(f.calls.requests.length, 0); assert.equal(f.calls.saves, 0); assert.equal(f.calls.prompts.length, 0);
+    assert.throws(() => f.api.assertLegacyClock(), /同步世界/);
+    f.store.preferences.autoMode = 'notes'; assert.doesNotThrow(() => f.api.assertLegacyClock());
 });
 
 let failures = 0;

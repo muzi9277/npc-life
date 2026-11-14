@@ -463,7 +463,7 @@ test('snapshot 分离活跃/归档/忽略 NPC，保留全部原字段及可读�
     assert.deepEqual(Object.keys(snapshot).sort(), [
         'identity', 'worldLabel', 'day', 'playerName', 'npcs', 'archivedNpcs', 'locations', 'routes',
         'events', 'diaries', 'conversations', 'preferences', 'profiles', 'profileError', 'profileMessage', 'serviceError',
-        'memory', 'mapImage', 'busy', 'autoNotes', 'automation',
+        'memory', 'mapImage', 'busy', 'autoNotes', 'automation', 'timeline',
     ].sort());
     f.state.world.catalog.npcs[0].archived = true;
     const archived = f.features.snapshot();

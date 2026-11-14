@@ -24,7 +24,7 @@ export function mountConsole(adapter) {
     let drafts = Object.create(null), generalDrafts = Object.create(null), renderedIdentity = state.identity, renderedTab = '', renderedNpc = '', identityEpoch = 0;
     let priorFocus = null, sizeObserver = null, modalFocus = null, modalKind = '', modalProfileId = '', modalEpoch = 0, modalBusy = false;
     const cleanups = [], root = $('<section id="npc-life-console" class="nlc" hidden aria-label="NPC Life 控制台" tabindex="-1"></section>');
-    root.html(`<header class="nlc-bar" data-drag><strong>NPC Life</strong><span class="nlc-version">3.0.0-beta.3</span><span class="nlc-world"></span><span class="nlc-controls"><button type="button" class="menu_button" data-smaller aria-label="缩小窗口" title="缩小">−</button><button type="button" class="menu_button" data-larger aria-label="放大窗口" title="放大">＋</button><button type="button" class="menu_button" data-min aria-label="最小化窗口" title="最小化">⌄</button><button type="button" class="menu_button" data-max aria-label="最大化或恢复窗口" title="最大化/恢复">□</button><button type="button" class="menu_button" data-close aria-label="关闭窗口" title="关闭">×</button></span></header><nav class="nlc-tabs" role="tablist" aria-label="控制台页面"></nav><div class="nlc-status" role="status" aria-live="polite"></div><main class="nlc-pages" role="tabpanel"></main>`);
+    root.html(`<header class="nlc-bar" data-drag><strong>NPC Life</strong><span class="nlc-version">3.0.0-beta.4</span><span class="nlc-world"></span><span class="nlc-controls"><button type="button" class="menu_button" data-smaller aria-label="缩小窗口" title="缩小">−</button><button type="button" class="menu_button" data-larger aria-label="放大窗口" title="放大">＋</button><button type="button" class="menu_button" data-min aria-label="最小化窗口" title="最小化">⌄</button><button type="button" class="menu_button" data-max aria-label="最大化或恢复窗口" title="最大化/恢复">□</button><button type="button" class="menu_button" data-close aria-label="关闭窗口" title="关闭">×</button></span></header><nav class="nlc-tabs" role="tablist" aria-label="控制台页面"></nav><div class="nlc-status" role="status" aria-live="polite"></div><main class="nlc-pages" role="tabpanel"></main>`);
     $('body').append(root);
     const channelDialog = $(`<div class="nlc-channel-overlay" hidden><section class="nlc-channel-dialog" role="dialog" aria-modal="true" aria-labelledby="nlc-channel-title" tabindex="-1"><header><b id="nlc-channel-title"></b><button type="button" class="menu_button" data-channel-close aria-label="关闭对话框">×</button></header><div class="nlc-channel-body"></div></section></div>`);
     $('body').append(channelDialog);
@@ -77,10 +77,10 @@ export function mountConsole(adapter) {
     function resetIdentity() { npcId = ''; diaryId = ''; drafts = Object.create(null); generalDrafts = Object.create(null); renderedTab = ''; closeDialog(false); tell(''); }
     // 捕获异步异常并拒绝把旧身份的结果应用到新身份。
     async function run(action, success, targets = {}) {
-        if (busy || state.busy || destroyed) return false;
+        if (busy || (state.busy && !targets.allowGlobalBusy) || destroyed) return false;
         captureDrafts();
         const identity = state.identity, epoch = identityEpoch;
-        busy = true; root.addClass('is-busy'); tell('处理中…');
+        busy = true; root.addClass('is-busy'); root.find('[data-world-exclusive]').prop('disabled',true); tell('处理中…');
         try {
             const result = await action();
             if (destroyed) return false;
@@ -91,7 +91,7 @@ export function mountConsole(adapter) {
             else if ((!targets.npc || targets.npc === npcId) && (!targets.tab || targets.tab === tab)) success?.(result);
             render(false); return result !== false;
         } catch (error) { if (!destroyed && epoch === identityEpoch) tell(error?.message || String(error), true); return false; }
-        finally { busy = false; root.removeClass('is-busy'); root.toggleClass('has-global-busy', Boolean(state.busy)); }
+        finally { busy = false; root.removeClass('is-busy'); root.toggleClass('has-global-busy', Boolean(state.busy)); root.find('[data-action="undo-world-turn"]').prop('disabled',Boolean(state.busy) || !(state.timeline?.turns || []).length || typeof adapter.undoWorldTurn !== 'function'); root.find('[data-action="reset-world-baseline"]').prop('disabled',Boolean(state.busy) || typeof adapter.resetWorldBaseline !== 'function'); }
     }
     // 后台自动记录仅以文本展示，心理侧写不作为角色事实。
     function autoNotesCard(npc = null) {
@@ -102,6 +102,56 @@ export function mountConsole(adapter) {
         if (!notes.length) section.append(empty(npc ? '此联系人暂无自动记录。' : '暂无自动记录。自动运转默认关闭，可在设置中启用。'));
         return section;
     }
+    // 世界时间只取正文耗时；基准日与整天工作台日期独立展示。
+    function worldTime(minute, timeline) {
+        if (!Number.isFinite(minute)) return '时间未知';
+        const clock = Math.max(0, Math.floor(minute)), base = Number.isFinite(timeline?.baseDay) ? timeline.baseDay : 1;
+        return `第 ${base + Math.floor(clock / 1440)} 天 ${String(Math.floor(clock % 1440 / 60)).padStart(2,'0')}:${String(clock % 60).padStart(2,'0')}`;
+    }
+    // 计划中的私有细节只在本地 UI 展示，不额外调用生成接口。
+    function worldPlans(timeline, npc = null) {
+        const plans = (timeline?.plans || []).filter(plan => !npc || (plan.npcIds || []).includes(npc.id));
+        const section = $('<div class="nlc-world-plans">').attr('data-world-plans', npc?.id || 'all');
+        const labels = { active:'进行中', pending:'待推进', planned:'已计划', running:'进行中', blocked:'受阻', paused:'已暂停', completed:'已完成', done:'已完成', cancelled:'已取消', skipped:'已跳过' };
+        plans.forEach(plan => {
+            const steps = plan.steps || [], done = steps.filter(step => ['completed','done','skipped'].includes(step.status)).length;
+            const item = $('<article class="nlc-item nlc-world-plan">').attr('data-plan-id',plan.id).append($('<b>').text(plan.goal || '未命名计划'), $('<p>').text(`${labels[plan.status] || plan.status || '待推进'} · 步骤 ${done}/${steps.length}`));
+            if (!npc) { const names = (plan.npcIds || []).map(id => (state.npcs || []).find(n => n.id === id)?.name || id); if (names.length) item.append($('<p class="nlc-muted">').text(names.join('、'))); }
+            if (plan.reason) item.append($('<p data-plan-reason>').text(`原因 / 阻断：${plan.reason}`));
+            const list = $('<ol class="nlc-world-steps">');
+            steps.forEach(step => list.append($('<li>').append($('<span>').text(`${step.summary || step.kind || '步骤'} · ${labels[step.status] || step.status || '待推进'}`), $('<small>').text([Number.isFinite(step.remainingMinutes) ? `剩余 ${step.remainingMinutes} 分钟` : '', Number.isFinite(step.durationMinutes) ? `预计 ${step.durationMinutes} 分钟` : ''].filter(Boolean).join(' / ')))));
+            item.append(list); section.append(item);
+        });
+        if (!plans.length) section.append(empty(npc ? '此联系人暂无世界计划。' : '暂无世界计划。新计划从下一轮开始推进。'));
+        return section;
+    }
+    // 时间待审核时保留来源，拒绝仅暂停，撤销与基线重置需要明确确认。
+    function worldCard() {
+        const timeline = state.timeline, pending = timeline?.pending, section = card('同步世界').attr('data-world-timeline','');
+        section.append($('<p class="nlc-muted">').text('按正文中可确认的耗时推进；每 N 条新 AI 正文只是检查间隔，不代表经过 N 分钟或 N 天。新计划从下一轮开始推进。不要与旧工作台的手动整天推进 / 旅行混用。'));
+        if (!timeline) section.append(empty('世界尚未初始化：下一次触发时建立当前正文起点，不补跑旧正文；也可点击“重置世界基线”立即建立起点。'));
+        else {
+            section.append($('<p class="nlc-world-clock" data-world-clock>').text(`${worldTime(timeline.clockMinutes,timeline)} · 基准第 ${timeline.baseDay ?? 1} 天 · 修订 ${timeline.revision ?? 0}`));
+            if (timeline.pausedReason) section.append($('<p class="nlc-error" data-world-paused>').text(`暂停原因：${timeline.pausedReason}`));
+            if (pending) {
+                const review = $('<section class="nlc-world-review">').attr('data-world-pending','').append($('<h4>').text('正文时间待审核'));
+                if (pending.reason) review.append($('<p>').text(pending.reason));
+                if (pending.timeEvidence != null) review.append($('<p class="nlc-muted" data-time-evidence>').text(`时间依据：${typeof pending.timeEvidence === 'string' ? pending.timeEvidence : JSON.stringify(pending.timeEvidence)}`));
+                review.append(field('确认本轮正文耗时（分钟）', 'world-time-minutes', '', 'number').find('input').attr({ min:0, max:10080, step:1 }).end(), $('<p class="nlc-muted">').text('请输入 0–10080 的整数分钟；0 表示跳过本轮时间推进，仍处理计划。拒绝会明确暂停同步世界，待审核正文来源保留，不会丢弃。'), $('<div class="nlc-row">').append(button('确认时间并处理', 'confirm-world-time').prop('disabled',typeof adapter.confirmWorldTime !== 'function'), button('拒绝并暂停（保留来源）', 'reject-world-time').prop('disabled',typeof adapter.rejectWorldTime !== 'function')));
+                section.append(review);
+            }
+            section.append($('<h4>').text('世界计划'),worldPlans(timeline));
+            const turns = $('<div data-world-turns>').append($('<h4>').text('最近 3 轮'));
+            (timeline.turns || []).slice(-3).reverse().forEach(turn => { const sources = Array.isArray(turn.sources) ? turn.sources.length : 0; turns.append($('<article class="nlc-item">').attr('data-turn-id',turn.id).append($('<b>').text(`轮次 ${turn.id || '未知'}`), $('<p>').text(`${Number.isFinite(turn.deltaMinutes) ? `推进 ${turn.deltaMinutes} 分钟` : '时间未确认'} · ${sources} 条来源${turn.status ? ` · ${turn.status}` : ''}`))); });
+            if (!(timeline.turns || []).length) turns.append(empty('暂无世界轮次。'));
+            const events = $('<div data-world-events>').append($('<h4>').text('最近 6 条事件'));
+            (timeline.events || []).slice(-6).reverse().forEach(event => { const known = Array.isArray(event.knownBy) ? event.knownBy.map(id => (state.npcs || []).find(n => n.id === id)?.name || id).join('、') : ''; events.append($('<article class="nlc-item">').attr('data-world-event-id',event.id).append($('<b>').text(worldTime(event.clockMinutes ?? event.minute,timeline)), $('<p>').text(event.summary || '未提供摘要'), $('<small>').text(known ? `已知者：${known}` : '已知者未记录'))); });
+            if (!(timeline.events || []).length) events.append(empty('暂无已记录的世界事件。'));
+            section.append(turns,events);
+        }
+        section.append($('<div class="nlc-row nlc-world-actions">').append(button('暂停自动运转', 'pause-automation').prop('disabled',!state.automation?.enabled || typeof adapter.pauseAutomation !== 'function'), button('撤销最后世界轮', 'undo-world-turn').attr('data-world-exclusive','').prop('disabled',busy || state.busy || !(timeline?.turns || []).length || typeof adapter.undoWorldTurn !== 'function'), button('重置世界基线', 'reset-world-baseline').attr('data-world-exclusive','').prop('disabled',busy || state.busy || typeof adapter.resetWorldBaseline !== 'function')), $('<p class="nlc-muted">').text('这里只展示已记录的计划、轮次和事件，不代表完整的世界、资源或信息传播。'));
+        return section;
+    }
     // 自动状态来自核心快照；暂停与重置不修改其他表单草稿。
     function automationCard() {
         const a = state.automation || {}, every = a.every ?? state.preferences?.autoEveryReplies ?? 5;
@@ -110,7 +160,7 @@ export function mountConsole(adapter) {
         section.append($('<p data-automation-status role="status" aria-live="polite">').text(`${a.enabled ? '已启用' : '已关闭'} · ${labels[a.status] || a.status || '等待新 AI 正文'} · 新 AI 正文 ${a.count ?? 0} / ${every}${a.pending ? ' · 有待处理任务' : ''}`));
         if (a.unsupported) section.append($('<p class="nlc-muted">').text(typeof a.unsupported === 'string' ? a.unsupported : '当前宿主不支持自动运转事件，请使用手动操作。'));
         if (a.error) section.append($('<p class="nlc-error">').text(a.error));
-        section.append($('<div class="nlc-row">').append(button('暂停自动运转', 'pause-automation').prop('disabled', !a.enabled || typeof adapter.pauseAutomation !== 'function'), button('重置计数', 'reset-automation').prop('disabled', typeof adapter.resetAutomation !== 'function')), $('<p class="nlc-muted">').text('仅按新 AI 正文计数；达到间隔后每轮最多轮转 6 位联系人，每轮 2 次请求（analysis + simulation）。不推进日期，不向主聊天写正文；心理侧写不权威。'));
+        section.append($('<div class="nlc-row">').append(button('暂停自动运转', 'pause-automation').prop('disabled', !a.enabled || typeof adapter.pauseAutomation !== 'function'), button('重置计数', 'reset-automation').prop('disabled', typeof adapter.resetAutomation !== 'function')), $('<p class="nlc-muted">').text(state.preferences?.autoMode === 'world' ? '同步世界：每 N 条新 AI 正文检查一次，间隔不是世界耗时；按正文耗时推进，未知时间待审核，新计划下轮推进。不与旧手动整天推进 / 旅行混用。' : '当前侧写：仅按新 AI 正文计数；达到间隔后每轮最多轮转 6 位联系人，每轮 2 次请求（analysis + simulation）。不推进日期，不向主聊天写正文；心理侧写不权威。'));
         return section;
     }
     // 暂停应在自动任务占用核心时仍可执行，单独防止重复点击。
@@ -129,7 +179,7 @@ export function mountConsole(adapter) {
         const workbench = $('<details class="nlc-workbench"><summary>高级世界工作台</summary><div class="nlc-workbench-body"></div></details>');
         try { const panel = oldPanel || adapter.getWorkbench?.(); if (panel?.nodeType) { if (!oldPanel) { oldPanel = panel; oldPanelParent = panel.parentNode; oldPanelNext = panel.nextSibling; } workbench.find('.nlc-workbench-body').append(panel); } }
         catch (error) { tell(error?.message || String(error), true); }
-        page.append(automationCard(), autoNotesCard(), cards, workbench); pages.append(page);
+        page.append(automationCard(), worldCard(), autoNotesCard(), cards, workbench); pages.append(page);
     }
     // 创建联系人资料、日记和独立后台试聊分组。
     function contacts() {
@@ -151,7 +201,8 @@ export function mountConsole(adapter) {
             const chatCard = card('后台试聊'), chat = $('<div class="nlc-chat" role="log" aria-label="试聊记录">');
             ((state.conversations || {})[npc.id] || []).forEach(m => chat.append($('<div class="nlc-bubble">').addClass(m.role === 'user' ? 'from-user' : 'from-npc').text(m.content || '')));
             chatCard.append(chat, chat.children().length ? '' : empty('还没有试聊记录。此处独立保存，不发送到酒馆主聊天。'), $('<label class="nlc-field">').append($('<span>').text('试聊消息'), $('<textarea class="text_pole" data-field="chat-text" rows="3" placeholder="Enter 发送，Shift+Enter 换行"></textarea>')), $('<div class="nlc-row">').append(button('发送', 'chat-send'), button('清空记录', 'chat-clear')));
-            detail.append(info, autoNotesCard(npc), diaryCard, chatCard);
+            const plans = card('世界计划（仅界面）').append($('<p class="nlc-muted">').text('此处显示该联系人的 timeline 计划，包含私有计划也仅用于界面展示，不加入提示词。'), worldPlans(state.timeline,npc));
+            detail.append(info, plans, autoNotesCard(npc), diaryCard, chatCard);
         }
         page.append(roster, detail); pages.append(page);
     }
@@ -201,7 +252,8 @@ export function mountConsole(adapter) {
         const p = state.preferences || {}, page = $('<div class="nlc-page nlc-settings">');
         const basic = card('基础偏好').append($('<div class="nlc-form-grid">').append(field('用户称呼', 'userName', p.userName), field('日记字数', 'diaryChars', p.diaryChars, 'number'), field('上下文预算', 'contextChars', p.contextChars, 'number')));
         const memory = card('增强记忆').append($('<label class="checkbox_label"><input type="checkbox" data-pref="memoryEnabled"><span>启用增强记忆</span></label>').find('input').prop('checked', Boolean(p.memoryEnabled)).end(), field('记忆预算', 'memoryChars', p.memoryChars, 'number'));
-        const auto = card('自动运转').append($('<label class="checkbox_label"><input type="checkbox" data-pref="autoEnabled"><span>启用自动运转（默认关闭）</span></label>').find('input').prop('checked', p.autoEnabled === true).end(), field('每多少条新 AI 正文运行一次', 'autoEveryReplies', p.autoEveryReplies ?? 5, 'number').find('input').attr({ min:1, max:100, step:1 }).end(), $('<p class="nlc-muted">').text('仅按新 AI 正文计数；每轮最多轮转 6 位联系人，每轮 2 次请求（analysis + simulation）。不推进日期，不向主聊天写正文；心理侧写仅供参考，不权威。保存偏好后生效，可在动态页暂停或重置计数。'));
+        const autoMode = $('<select class="text_pole" data-field="autoMode"><option value="notes">当前侧写</option><option value="world">同步世界</option></select>').val(p.autoMode === 'world' ? 'world' : 'notes');
+        const auto = card('自动运转').append($('<label class="checkbox_label"><input type="checkbox" data-pref="autoEnabled"><span>启用自动运转（默认关闭）</span></label>').find('input').prop('checked', p.autoEnabled === true).end(), $('<label class="nlc-field">').append($('<span>').text('自动模式'),autoMode), field('每多少条新 AI 正文检查一次', 'autoEveryReplies', p.autoEveryReplies ?? 5, 'number').find('input').attr({ min:1, max:100, step:1 }).end(), $('<p class="nlc-muted">').text('当前侧写（默认）：每轮最多轮转 6 位联系人，每轮 2 次请求（analysis + simulation），不推进日期；心理侧写仅供参考，不权威。同步世界：每 N 条只是检查间隔，不是时间；按正文耗时推进，未知时间待审核，新计划从下一轮推进。不要与旧手动整天推进 / 旅行混用。两种模式均由上方开关启用，默认关闭；保存偏好后生效，可在动态页暂停或重置计数。'));
         const profile = $('<select class="text_pole" data-field="secondaryProfileId"><option value="">无副 profile</option></select>'), profiles = state.profiles || [];
         profiles.forEach(x => profile.append($('<option>').val(x.id).text(`${x.name || x.id} · ${x.model || '模型未知'}`)));
         // 失效的已保存选择及刷新前的草稿都保留，disabled option 不能由 jQuery.val() 读取。
@@ -236,7 +288,7 @@ export function mountConsole(adapter) {
     }
     // 将设置表单转换为 adapter 接受的偏好补丁。
     function preferencePatch() {
-        const patch = { userName:root.find('[data-field="userName"]').val(), diaryChars:Number(root.find('[data-field="diaryChars"]').val()), contextChars:Number(root.find('[data-field="contextChars"]').val()), memoryEnabled:root.find('[data-pref="memoryEnabled"]').prop('checked'), memoryChars:Number(root.find('[data-field="memoryChars"]').val()), secondaryProfileId:root.find('[data-field="secondaryProfileId"]')[0]?.value || '', autoEnabled:root.find('[data-pref="autoEnabled"]').prop('checked'), autoEveryReplies:Number(root.find('[data-field="autoEveryReplies"]').val()), maxTokens:Number(root.find('[data-field="maxTokens"]').val()), routes:{}, templates:{} };
+        const patch = { userName:root.find('[data-field="userName"]').val(), diaryChars:Number(root.find('[data-field="diaryChars"]').val()), contextChars:Number(root.find('[data-field="contextChars"]').val()), memoryEnabled:root.find('[data-pref="memoryEnabled"]').prop('checked'), memoryChars:Number(root.find('[data-field="memoryChars"]').val()), secondaryProfileId:root.find('[data-field="secondaryProfileId"]')[0]?.value || '', autoEnabled:root.find('[data-pref="autoEnabled"]').prop('checked'), autoMode:root.find('[data-field="autoMode"]').val() === 'world' ? 'world' : 'notes', autoEveryReplies:Number(root.find('[data-field="autoEveryReplies"]').val()), maxTokens:Number(root.find('[data-field="maxTokens"]').val()), routes:{}, templates:{} };
         root.find('[data-route]').each(function () { patch.routes[$(this).attr('data-task')] = $(this).val(); }); root.find('[data-template]').each(function () { patch.templates[$(this).attr('data-template')] = $(this).val(); }); return patch;
     }
     // 只接受明确支持的地图图片格式。
@@ -280,6 +332,20 @@ export function mountConsole(adapter) {
         body.find('[data-confirm-archive]').on('click.nlcConfirm', () => { if (identity !== (adapter.snapshot() || {}).identity) { render(); return; } closeDialog(); run(() => { if (typeof adapter.archiveNpc !== 'function') throw new Error('当前核心尚未提供联系人归档接口。'); return adapter.archiveNpc(id,ignored); }, () => { delete drafts[id]; if (npcId === id) { npcId = ''; diaryId = ''; } tell(ignored ? '联系人已永久忽略，历史保留，可在档案恢复。' : '联系人已归档，历史保留。'); }); });
         body.find('[data-channel-done]')[0].focus();
     }
+    // 撤销和重置先明确说明投影边界，确认后再次检查核心占用。
+    function confirmWorldAction(reset = false) {
+        const identity = state.identity, revision = state.timeline?.revision;
+        showDialog(reset ? '确认重置世界基线' : '确认撤销最后世界轮', 'confirm-world');
+        const body = channelDialog.find('.nlc-channel-body');
+        body.append($('<p>').text(reset ? '重置会撤回本模块能够撤销的投影，保留人工校准；以当前正文建立新的起点，不补跑历史正文。确认建立当前正文基线？' : '撤销最后一轮世界推进，会撤回本模块可撤销的该轮投影，保留人工校准。确认撤销最后世界轮？'), $('<div class="nlc-channel-actions">').append($('<button type="button" class="menu_button" data-channel-done>取消</button>'), $('<button type="button" class="menu_button" data-confirm-world>').text(reset ? '确认重置世界基线' : '确认撤销最后世界轮')));
+        body.find('[data-confirm-world]').on('click.nlcConfirm', () => {
+            const fresh = adapter.snapshot() || {};
+            if (fresh.identity !== identity || fresh.timeline?.revision !== revision) { closeDialog(); render(); tell('世界状态已变化，请检查后重新确认。',true); return; }
+            if (busy || fresh.busy) { tell('其他任务处理中，请稍后再确认。',true); return; }
+            closeDialog(); run(() => reset ? adapter.resetWorldBaseline() : adapter.undoWorldTurn(), () => { if (generalDrafts['动态']) delete generalDrafts['动态']['field:world-time-minutes']; tell(reset ? '世界基线已重置，当前正文为起点，不补跑历史。' : '最后世界轮已撤销。'); });
+        });
+        body.find('[data-channel-done]')[0].focus();
+    }
     // 处理窗口控制和业务按钮，并在切换前保存草稿。
     root.on('click.nlc', '[data-action],[data-tab],[data-close],[data-min],[data-max]', function (event) {
         const el = $(this), action = el.attr('data-action'); captureDrafts();
@@ -287,6 +353,13 @@ export function mountConsole(adapter) {
         if (action === 'refresh-profiles') { try { render(false); tell('连接列表已刷新，未保存的草稿已保留。'); } catch (error) { tell(error?.message || String(error),true); } return; }
         if (action === 'pause-automation') { controlAutomation(); return; }
         if (action === 'reset-automation') { controlAutomation(true); return; }
+        if (action === 'undo-world-turn' || action === 'reset-world-baseline') { if (!busy && !state.busy) confirmWorldAction(action === 'reset-world-baseline'); return; }
+        if (action === 'confirm-world-time') {
+            const raw = String(root.find('[data-field="world-time-minutes"]').val() ?? '').trim(), minutes = Number(raw);
+            if (!raw || !Number.isInteger(minutes) || minutes < 0 || minutes > 10080) { tell('世界时间须为 0–10080 的整数分钟；0 跳过时间推进，仍处理计划。',true); return; }
+            run(() => adapter.confirmWorldTime(minutes), () => { if (generalDrafts['动态']) delete generalDrafts['动态']['field:world-time-minutes']; tell('时间审核已处理。'); }, { allowGlobalBusy:true }); return;
+        }
+        if (action === 'reject-world-time') { run(() => adapter.rejectWorldTime(), () => tell('同步世界已暂停，待审核正文来源保留。'), { allowGlobalBusy:true }); return; }
         if (el.is('[data-tab]')) { tab = el.attr('data-tab'); persist(); render(false); root.find(`[data-tab="${tab}"]`)[0]?.focus(); return; }
         if (el.is('[data-close]')) { persist(); root.prop('hidden',true); priorFocus?.focus?.(); return; }
         if (el.is('[data-min]')) { if (!minimized) persist(); minimized = !minimized; root.toggleClass('is-minimized',minimized); if (!minimized) { clampConsole(root[0]); persist(); } return; }
