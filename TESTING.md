@@ -1,98 +1,33 @@
-# 测试说明
+# 自动精简版测试
 
-版本目标：`3.0.0-beta.5`，运行环境：SillyTavern `1.17.0`。
+当前版本：`3.0.0-beta.6`。运行扩展只有三个文件、无依赖和构建；以下依赖仅用于开发测试。
 
-## 本地自动回归
-
-运行时扩展仍无依赖、无构建。测试不调用真实 API，`core` 和 `services` 使用虚构上下文与 mock：
+## 逻辑回归
 
 ```sh
-node tests/core.test.mjs
-node --test tests/services.test.mjs
-node --test tests/automation.test.mjs tests/integration.test.mjs
-node --test tests/timeline.test.mjs tests/world-service.test.mjs tests/world-integration.test.mjs
+bun tests/auto.test.mjs
 ```
 
-UI 测试需开发环境安装 `happy-dom`；启用真实布局检查还需 `playwright` 和本机 Edge。通过 `ST_ROOT` 指向本机 SillyTavern 源目录，用于读取宿主随附 jQuery：
+使用虚构角色卡、聊天、事件总线和模型输出；没有网络访问、没有读取真实用户卡片或聊天。测试加载当前入口的业务函数、移除宿主import并显式调用init，因此不能代替真实酒馆启动与生成联调。
+
+覆盖14项：加载不生成、单新回复单请求、限频不延迟补跑、关闭清注入与丢在途、聊天隔离、编辑撤记录、删除后低下标新回复、quiet/重抽/续写/开场不触发、前台开始使旧结果失效、拒收疑似截断、不计停止的部分正文、20条上限与三条注入、世界书清洗与预算、旧姓名只迁移一次。请求载荷测试验证只有带独有标记的请求被设为1200 token，其他请求载荷不变。
+
+## 设置页DOM
+
+测试依赖 Happy DOM，可用 `UI_HAPPY_DOM` 指向已有模块file URL。`ST_ROOT` 指向本机酒馆根目录，仅读取其公开的jQuery源码，不读取配置或用户数据。
 
 ```sh
-ST_ROOT=/path/to/SillyTavern node --test tests/console.test.mjs
-ST_ROOT=/path/to/SillyTavern UI_LAYOUT=1 node --test tests/console.test.mjs
+ST_ROOT=/path/to/SillyTavern UI_HAPPY_DOM=file:///path/to/happy-dom/lib/index.js bun tests/auto-ui.test.mjs
 ```
 
-默认只执行 DOM 行为检查；`UI_LAYOUT=1` 才运行实际布局检查。可用 `UI_HAPPY_DOM`、`UI_PLAYWRIGHT` 提供已安装模块的 file URL，`UI_BROWSER_CHANNEL` 指定浏览器通道（默认 `msedge`）。Happy DOM 只执行本机项目源码及宿主 jQuery，不用于运行用户脚本。
+未设置 `UI_HAPPY_DOM` 时从开发环境解析 `happy-dom`。覆盖单开关、嵌套高级设置、设置保存、频率范围、关闭清注入及防止重复挂载。此测试不验证浏览器真实布局或酒馆inline-drawer动画。
 
-测试源码位于 `tests/`。核心覆盖软删/忽略/恢复、扫描墓碑、世界与聊天隔离、旅行、模拟失败事务、消息锚点、字段版本撤销、后续修改保留及旧数据待复核。服务覆盖副连接强制测试路由、串行队列、64 token 测试预算、无静默回退、切身份与归档期间不提交旧内容。UI 覆盖五页切换、草稿、取消、归档恢复入口、空地图、连接详情、工作台节点复挂与清理。
+## 真实使用待验证
 
-真实渲染另用本地虚构 fixture 在 Edge/Chromium 检查默认560×640、桌面360/480/720宽度及手机宽度，验证容器单双列、按钮不换行和横向溢出。该 fixture 不连接酒馆用户数据，不能代替完整 ST 页面联调。
+1. 更新后刷新，仅出现自动版界面，旧版不再注册任务；检查不重复安装两个活动副本。
+2. 开启后正常发一条回复，当前主API收到一次后台请求；观察预算和供应商结束原因。
+3. 下一次正文是否自然采用相关人物经历，是否遵守用户最新创作与隐私边界。
+4. 在途切聊天、关闭、停止及重新生成后不残留旧结果。
+5. 不同模型、模板和其他扩展会修改请求或事件，需分别联调；不保证输出字数或故事正确性。
 
-## 测试范围
-
-### 浏览器 UI 测试
-
-安装包含以下 9 个运行文件：`index.js`、`style.css`、`console.js`、`console.css`、`services.js`、`automation.js`、`timeline.js`、`world-service.js`、`manifest.json`。在浏览器加载扩展后执行 `Ctrl+F5`，确认扩展设置可打开，五页手机式控制台可切换，版本条诊断显示 `3.0.0-beta.5`。`services.js` 的职责包括 API 分流、只读记忆、独立后台试聊和地图导入。
-
-逐项检查：
-
-- 联系人状态可以显示，日记目标字数可选 `50`、`200`、`800`、`1600` 和自定义；界面将其作为目标提示，不断言精确字数。
-- 试聊按钮只创建独立后台会话，不新增主聊天消息，不改变世界或 NPC 主状态。
-- 地图可显示自身地点、tags 和路线；导入 JSON 后先显示候选，只有确认后才进入自身目录。
-- 地图图片仅接受本地 `PNG`、`JPG/JPEG`、`WebP` 数据 URL；不会请求第三方地图 API。
-- 设置变更重新加载后仍可从 `extensionSettings['npc-life']` 恢复；界面布局从 `localStorage` 恢复。
-- 关闭记忆增强开关时不读取记忆表；开启后只检查当前聊天最近非用户消息、关键词和行预算行为。
-- 未确认地点、未知解析结果和过期记忆不会覆盖当前状态。
-
-## 同步世界回归
-
-- 0分钟创建90分钟计划但不完成，之后60+30分钟跨轮结算；所有旧计划同步推进，新计划不倒算；路线分钟取已确认耗时和慢成员能力。
-- 不完整同行组、未知地点/路线、在场后台移动、锁定活动阻断；只接受有限中性动作模板，模型不能直接写任意新事实。
-- 时间必须原文证据与本地时长解析一致，否定/未来/引用/模糊片刻待审核；人工可确认0–10080整数分钟。
-- 来源编辑撤第一个受影响回合及依赖后缀；重复检测不反复保存；day/人工同值/正史校准保留，外部变化暂停而不是整档回滚。
-- 真实服务队列+世界业务+纯引擎组合验证 knownEventIds、用户取消和在途守卫；同场已知结果才进入timelineContext，远处及停用人物不输出。
-- world模式旧日模拟和旅行入口拒绝；九运行文件完整、默认notes模式、不自动补跑旧历史。
-
-## 自动与连接入口回归
-
-- 自动默认关闭，开启后只计新的AI正文；已存在历史、重复渲染、重抽、续写、编辑、删除不额外计数。
-- 每N条触发、轮转6人、单一在途任务、宿主忙时等待、关闭/切身份/正文变更丢旧结果、失败暂停无循环请求。
-- 场景分析必须有证据或明确存档支持；在场仅动作/心理，离场仅当前已知地点活动，未知跳过。
-- 自动记录只存autoNotes，不写ctx.chat、events、canon、不推进day；心理不注入角色可知上下文。
-- 连接列表为空、异常和缺失服务显示不同提示；新增管理入口只打开宿主抽屉，不自动填参数/切profile；缺DOM明确报错。
-- 创建profile后刷新保留设置草稿，失效profile显示但不可测；同供应商密钥隔离不在mock通过声明内。
-
-## API mocks
-
-API mock 应覆盖以下接口边界：
-
-1. 主 API：`generateRaw` 默认收到 ST 当前选定配置，且请求只使用独立 prompt。
-2. ST 副 API：`ConnectionManagerRequestService.getSupportedProfiles` 返回可选 profile；`sendRequest` 验证所选副 profile 与任务路由。preset/model 继承 profile。
-3. 副 API 失败：界面显示错误，不调用主 API 作为静默 fallback。
-4. 记忆增强：mock `window.stMemoryEnhancement.ext_getAllTables`，确认默认关闭；开启后只截取关键词命中的行并遵守行预算。
-5. 生成失败或返回未知内容：错误可见，未知保持未知，不伪造地点、状态或路线。
-
-## 数据与副作用检查
-
-- 试聊结果不写入主聊天，不调用主世界状态更新。
-- 地图导入确认前不写入自身目录；确认后只写扩展自身设置。
-- 模板只追加文本；没有生成前 hard interception。
-- 记忆表读取不写外部表，过期表格不覆盖当前状态。
-- 不保存连接密钥，不切换主连接。
-
-## 联调边界
-
-本项目记录浏览器 UI 测试和 API mocks 的测试方式。连接功能目前限本机测试，本文不声称已经调用真实 API 完成所有联调；真实 API 行为仍取决于本机酒馆连接配置、profile、preset 和模型服务。测试也不把主模型遵守注入内容视为可保证条件。
-
-## 回归记录格式
-
-提交测试记录时请至少填写：
-
-```text
-环境：ST 版本 / 浏览器 / 扩展版本
-范围：UI / 主 API mock / 副 API mock / 记忆 mock
-步骤：最小复现或操作顺序
-预期：
-实际：
-主聊天是否变化：是 / 否
-世界状态是否变化：是 / 否
-是否调用真实 API：是 / 否
-```
+本次发布不声称已调用真实付费API，不以mock通过证明20字截断已解决。历史完整版测试与说明移到 `legacy/beta5/`，不作为当前版本测试结果。
