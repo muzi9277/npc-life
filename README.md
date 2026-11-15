@@ -1,6 +1,6 @@
 # NPC Life 同步世界
 
-版本：`3.3.2-sync`
+版本：`3.3.3-sync`
 
 目标环境：SillyTavern `1.17.0`
 

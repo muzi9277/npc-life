@@ -18,11 +18,17 @@ const source = originalSource
     .replace('let consoleFeatures = null;', 'let consoleFeatures = mockConsoleFeatures;')
     .replace(/jQuery\(init\);\s*$/, '');
 assert.doesNotMatch(source, /^import\s/m);
+const staleSource = originalSource.slice(
+    originalSource.indexOf('function staleStorySourceKeys'),
+    originalSource.indexOf('function refreshPromptAfterStoryChange'),
+);
+assert.match(staleSource, /keys\.some\(/);
+assert.doesNotMatch(staleSource, /keys\.every\(/);
 const names = [
     'activeData', 'rootSettings', 'makeNpc', 'makeNpcState', 'makeLocation', 'mergeCatalog',
     'ensureCatalog', 'discoverCatalog', 'classifyNpc', 'mergeNpcIdentity', 'undoNpcMerge',
     'archiveNpc', 'restoreNpc', 'activeNpc', 'resolveEntity', 'confirmedLocation',
-    'messageAnchors', 'canonFields', 'observeCanonFields', 'revokeCanonFact', 'revokeMissingCanonFacts',
+    'messageAnchors', 'initializePromptSync', 'canonFields', 'observeCanonFields', 'revokeCanonFact', 'revokeMissingCanonFacts',
     'normalizeFact', 'applyCanonFact', 'extractStoryFacts', 'addEvent', 'save', 'savePreferences',
     'findRoute', 'validateTransition', 'evaluateAppearanceRequest', 'evaluateRequestMotivation', 'confirmTravelPlan',
     'advanceTravelPlans', 'commitGameDay', 'validateSimulationEvents', 'simulateDay',
@@ -31,10 +37,10 @@ const names = [
 ];
 const loadCore = new Function('environment', `
     const { SillyTavern, $, jQuery, extension_prompt_types, extension_prompt_roles,
-        document, window, normalizeConsolePreferences, mockConsoleFeatures, mountConsole,
+        document, window, normalizeConsolePreferences, mockConsoleFeatures, mountConsole, npcLog,
         createConsoleFeatures, timelineContext, fetch, setInterval,
         normalizeLedger, appendSettlementDrafts, commitLedgerTurn, revokeLedgerTurn, revokeBySourceKeys,
-        draftsFromSettlement, formatLedgerInjection, canArrangeActivity, hasSufficientProfile, isUserDesignated,
+        draftsFromSettlement, formatLedgerInjection, buildLedgerInjection, tracesShownInText, canArrangeActivity, hasSufficientProfile, isUserDesignated,
         searchDiscoverableTraces, recordOfferedOpportunities, applyStoryDiscoveries,
         buildLivingWorldInjection } = environment;
     ${source}
@@ -102,6 +108,7 @@ function fixture({ trackNpc = false, entries = [] } = {}) {
             return `mock world context:${args[0].turns.at(-1)?.id || 'baseline'}`;
         },
         mountConsole: forbidden('console mount'), createConsoleFeatures: forbidden('real generation service'),
+        npcLog() {},
         fetch: forbidden('network fetch'), setInterval: forbidden('init timer'),
         ...ledgerApi,
         ...livingWorldApi,
@@ -297,6 +304,20 @@ test('explicit classification enables only people; organization and unknown neve
     assert.throws(() => f.api.mergeNpcIdentity(person.id, f.npc.id), /人物|活跃/);
     assert.equal(f.world.catalog.identityMerges.length, 0, 'unknown identity cannot be merged as an active person');
     assert.throws(() => f.api.classifyNpc(person.id, 'location'), /分类/);
+});
+
+test('已标记的组织可以改回人物', () => {
+    const f = fixture({ entries: [mixedIdentityEntry] });
+    const organization = f.world.catalog.organizations.find(item => item.name === '夜莺商会');
+    assert.ok(organization);
+    assert.equal(organization.entityType, 'organization');
+    f.api.classifyNpc(organization.id, 'person');
+    const person = f.api.resolveEntity(f.world, '夜莺商会', 'npc');
+    assert.ok(person);
+    assert.equal(person.entityType, 'person');
+    assert.equal(person.tracked, true);
+    assert.equal(person.confirmed, true);
+    assert.equal(f.world.catalog.organizations.some(item => item.id === organization.id), false);
 });
 
 const identityHistory = chat => structuredClone({
@@ -1479,6 +1500,73 @@ test('生产路径：偶遇受低概率与上限约束，囚禁和未登场资�
     assert.deepEqual(f.chat.injection.encounterNpcIds, [f.npc.id]);
     assert.equal(ledgerApi.isDiscoveredCanon(f.chat.activityLedger, traceId), false, '偶遇本身不得写回已发现');
     assert.equal((f.chat.activityLedger.discoveries || []).filter(item => item.knowledge === 'found').length, 0);
+});
+
+test('生产路径：只编辑助手回复时，同时依赖用户消息和助手回复的发现仍应撤回', async () => {
+    const f = fixture({ trackNpc: true });
+    const ledger = f.chat.activityLedger = ledgerApi.normalizeLedger();
+    const drafts = ledgerApi.draftsFromSettlement([{
+        id: 'e-search', kind: 'activity',
+        summary: '林青完成了事先计划的翻找藏书并翻乱了书架',
+        npcIds: [f.npc.id], locationId: f.north.id, turnId: 't1', knownBy: [],
+    }], [], { turnId: 't1', sourceKeys: ['src:act'], locationName: id => id === f.north.id ? '北塔' : id });
+    ledgerApi.appendSettlementDrafts(ledger, drafts, { turnId: 't1', sourceKeys: ['src:act'], createdAtTurn: 1 });
+    ledgerApi.commitLedgerTurn(ledger, 't1', 5);
+    const traceId = ledger.traces[0].id;
+    f.chat.player.locationId = f.north.id;
+    f.chat.player.scene = 'confirmed';
+    // 线索机会已在上一轮注入。本用例只改助手回复，不依赖注入文本拼装。
+    f.chat.injection = { offeredTraceIds: [traceId] };
+
+    const user = { is_user: true, id: 'user-msg', mes: '我停下来，仔细调查北塔这里好像有没有人来过。' };
+    const assistant = { is_user: false, id: 'assistant-msg', mes: '你蹲在地上查看，发现书架被翻乱，这里好像有人来过，留下了翻找的痕迹。' };
+    f.ctx.chat = [user, assistant];
+    f.respond({ facts: [] });
+    await f.api.extractStoryFacts();
+
+    const anchors = f.api.messageAnchors();
+    const userKey = anchors.find(item => item.role === 'user').key;
+    const assistantKey = anchors.find(item => item.role === 'assistant').key;
+    const found = (f.chat.activityLedger.discoveries || []).find(item => item.knowledge === 'found' && item.status === 'active');
+    assert.ok(found, '正文应写回同时依赖用户消息和助手回复的发现');
+    assert.ok(found.sourceKeys.includes(userKey));
+    assert.ok(found.sourceKeys.includes(assistantKey));
+
+    const activity = ledgerApi.recordActivity(f.chat.activityLedger, {
+        id: 'act:user-only', npcIds: [f.npc.id], phase: 'done',
+        summary: '只依赖仍在的用户消息', locationId: f.north.id,
+        turnId: 't-user', source: 'story', sourceKeys: [userKey],
+    });
+    assert.equal(activity.status, 'active');
+
+    const listeners = new Map();
+    f.ctx.eventSource = {
+        on(name, handler) {
+            if (!listeners.has(name)) listeners.set(name, new Set());
+            listeners.get(name).add(handler);
+        },
+        removeListener(name, handler) { listeners.get(name)?.delete(handler); },
+        async emit(name) {
+            for (const handler of [...(listeners.get(name) || [])]) await handler();
+        },
+    };
+    f.ctx.eventTypes = {
+        MESSAGE_SENT: 'message_sent',
+        MESSAGE_EDITED: 'message_edited',
+        MESSAGE_DELETED: 'message_deleted',
+        MESSAGE_SWIPED: 'message_swiped',
+    };
+    f.api.initializePromptSync();
+    assistant.mes = '你只是路过厅堂，没有停留。';
+    await f.ctx.eventSource.emit('message_edited');
+
+    const ledgerAfter = f.chat.activityLedger;
+    const foundAfter = (ledgerAfter.discoveries || []).find(item => item.id === found.id);
+    const activityAfter = (ledgerAfter.activities || []).find(item => item.id === activity.id);
+    assert.equal(foundAfter.status, 'revoked', '助手回复失效后，同时依赖两条来源的发现应撤回');
+    assert.equal(activityAfter.status, 'active', '仍在的用户消息键不应误撤只依赖它的活动');
+    assert.equal(f.api.messageAnchors().some(item => item.key === userKey), true);
+    assert.equal(f.api.messageAnchors().some(item => item.key === assistantKey), false);
 });
 
 let failures = 0;

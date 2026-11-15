@@ -231,11 +231,18 @@
     }
 
     #npc-life-settings .npc-life-fact .npc-life-buttons,
-    #npc-life-settings .npc-life-request .npc-life-buttons,
+    #npc-life-settings .npc-life-request .npc-life-buttons {
+        grid-column: 2;
+        grid-row: 1 / span 8;
+        align-self: start;
+        flex-direction: column;
+        flex-wrap: nowrap;
+        margin: 0;
+    }
+
     #npc-life-settings .npc-life-fact > .menu_button,
     #npc-life-settings .npc-life-request > .menu_button {
         grid-column: 2;
-        grid-row: 1 / span 3;
         align-self: start;
     }
 

@@ -1,4 +1,4 @@
-/* NPC Life 3.3.2-sync：偶遇地点改为软加权；保留 3.3.1 的发现写回自动循环及既有规则。 */
+/* NPC Life 3.3.3-sync：身份按钮与来源撤回修正；保留 3.3.2 的活动资料库与延迟发现。 */
 // 已核对 ST 1.17.0 public/script.js 的真实枚举导出和深度注入签名。
 import { extension_prompt_types, extension_prompt_roles, isGenerating } from '../../../../script.js';
 import { mountConsole } from './console.js';
@@ -9,7 +9,7 @@ import { createWorldService } from './world-service.js';
 import { normalizeLedger, appendSettlementDrafts, commitLedgerTurn, revokeLedgerTurn, revokeBySourceKeys, draftsFromSettlement, buildLedgerInjection, tracesShownInText, canArrangeActivity, hasSufficientProfile, isUserDesignated, recordOfferedOpportunities, applyStoryDiscoveries } from './activity-ledger.js';
 import { buildLivingWorldInjection } from './living-world.js';
 
-const RELEASE_VERSION = '3.3.2-sync';
+const RELEASE_VERSION = '3.3.3-sync';
 
 const MODULE_NAME = 'npc-life';
 const ROOT = '#npc-life-settings';
@@ -630,7 +630,7 @@ function classifyNpc(id, entityType) {
         person.entityType='person';person.identityEvidence=source.identityEvidence||person.identityEvidence||'';person.tracked=true;person.confirmed=true;
         person.aliases = [...new Set([...(person.aliases || []), ...(source.aliases || [])])].filter(alias => alias && alias !== person.name);
         if(!existing)world.catalog.npcs.push(person);
-        if (source.entityType === 'organization') world.catalog.organizations = world.catalog.organizations.map(item => item.id === id ? { ...item, reclassifiedAsNpcId: person.id } : item);
+        if (source.entityType === 'organization') world.catalog.organizations = world.catalog.organizations.filter(item => item.id !== id);
         world.catalog.identityCandidates = world.catalog.identityCandidates.filter(item=>item.id!==id);
     } else if(npc){
         npc.entityType='unknown';npc.tracked=false;npc.confirmed=false;
@@ -1962,12 +1962,20 @@ function renderRoster() {
     for (const item of world.catalog.identityCandidates || []) {
         const row = $('<div class="npc-life-fact"></div>').attr('data-identity-id', item.id).append($('<b></b>').text(item.name || '未知称呼'));
         row.append($('<small></small>').text(item.identityEvidence || '没有找到明确人物证据。'));
-        row.append($('<button type="button" class="menu_button" data-identity-person>确认为人物</button>'), $('<button type="button" class="menu_button" data-identity-organization>标为组织</button>'));
+        const buttons = $('<div class="npc-life-buttons"></div>');
+        buttons.append($('<button type="button" class="menu_button" data-identity-person>确认为人物</button>'));
+        buttons.append($('<button type="button" class="menu_button" data-identity-organization>标为组织</button>'));
+        row.append(buttons);
         candidates.append(row);
     }
     if (!candidates.children().length) candidates.text('暂无待确认身份称呼。');
     const organizations = $(`${ROOT} [data-organization-catalog]`).empty();
-    for (const item of world.catalog.organizations || []) organizations.append($('<div class="npc-life-event"></div>').text(`${item.name}｜资料组织，不参与人物行动`));
+    for (const item of world.catalog.organizations || []) {
+        const row = $('<div class="npc-life-event"></div>').attr('data-identity-id', item.id);
+        row.text(`${item.name}｜资料组织，不参与人物行动`);
+        row.append($('<div class="npc-life-buttons"></div>').append($('<button type="button" class="menu_button" data-identity-person>改回人物</button>')));
+        organizations.append(row);
+    }
     if (!organizations.children().length) organizations.text('暂无组织资料。');
 }
 

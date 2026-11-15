@@ -1,5 +1,5 @@
 /* NPC Life 精简面板：名册、近期结算、跟踪开关和基本设置。 */
-const VERSION = '3.3.2-sync';
+const VERSION = '3.3.3-sync';
 
 function clamp(node) {
     if (node.hidden) return;
