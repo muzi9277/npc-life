@@ -1,0 +1,44 @@
+.npc-life-auto-settings .checkbox_label {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.npc-life-auto-settings .text_pole {
+    min-width: 0;
+    max-width: 100%;
+    flex: 1 1 120px;
+}
+
+.npc-life-auto-settings input[type="number"] {
+    flex: 0 1 90px;
+}
+
+.npc-life-auto-settings .npc-life-auto-status {
+    margin: 8px 0;
+    font-size: 0.9em;
+    opacity: 0.85;
+    line-height: 1.6;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+}
+
+.npc-life-auto-settings .npc-life-auto-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.npc-life-auto-settings .menu_button {
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.npc-life-auto-settings small {
+    display: block;
+    line-height: 1.5;
+    opacity: 0.8;
+}
