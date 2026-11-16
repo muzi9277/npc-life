@@ -1,5 +1,5 @@
 /* NPC Life 精简面板：名册、近期结算、跟踪开关和基本设置。 */
-const VERSION = '3.3.3-sync';
+const VERSION = '3.3.10-sync';
 
 function clamp(node) {
     if (node.hidden) return;
@@ -119,10 +119,11 @@ export function mountConsole(adapter) {
         pages.append(ledgerCard);
 
         const settings = card('基本设置');
-        settings.append($('<p class="nlc-muted">').text(`自动结算：${auto.enabled ? (auto.status || '开启') : '关闭'} · 每 ${prefs.autoEveryReplies || 1} 条回复结算一轮。记忆插件${prefs.memoryEnabled ? '只读参考，不能覆盖正史，也不会写回' : '未启用读取'}。未写时间则不推进时钟。`));
+        settings.append($('<p class="nlc-muted">').text(`自动结算：${auto.enabled ? (auto.status || '开启') : '关闭'} · 每 ${prefs.autoEveryReplies || 1} 条回复结算一轮。背景近况每 ${prefs.backgroundPlotEvery || 3} 条角色回复写一次。记忆插件${prefs.memoryEnabled ? '只读参考，不能覆盖正史，也不会写回' : '未启用读取'}。未写时间则不推进时钟。`));
         settings.append($('<div class="nlc-form-grid">').append(
             $('<label class="nlc-field nlc-check">').append($('<input type="checkbox" data-field="autoEnabled">').prop('checked', prefs.autoEnabled !== false), $('<span>').text('启用自动结算')),
             field('结算间隔（条回复）', 'autoEveryReplies', prefs.autoEveryReplies ?? 1, 'number'),
+            field('背景近况间隔（条角色回复）', 'backgroundPlotEvery', prefs.backgroundPlotEvery ?? 3, 'number'),
             field('称呼', 'userName', prefs.userName || '', 'text'),
             $('<label class="nlc-field nlc-check">').append($('<input type="checkbox" data-field="memoryEnabled">').prop('checked', prefs.memoryEnabled === true), $('<span>').text('读取记忆插件（只读参考，非正史，不写回）')),
             $('<label class="nlc-field nlc-check">').append($('<input type="checkbox" data-field="autoNotesEnabled">').prop('checked', prefs.autoNotesEnabled === true), $('<span>').text('启用后台侧写（默认关闭，不进正史）')),

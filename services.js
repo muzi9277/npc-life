@@ -44,6 +44,7 @@ export function normalizeConsolePreferences(value = {}) {
         maxTokens: integer(value.maxTokens, 2048, 256, 8192),
         autoEnabled: value.autoEnabled !== false,
         autoEveryReplies: integer(value.autoEveryReplies ?? 1, 1, 1, 100),
+        backgroundPlotEvery: integer(value.backgroundPlotEvery ?? 3, 3, 1, 100),
         autoMode: value.autoMode === 'notes' ? 'notes' : 'world',
         autoNotesEnabled: value.autoNotesEnabled === true,
         logLevel: normalizeLogLevel(value),

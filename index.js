@@ -1,4 +1,4 @@
-/* NPC Life 3.3.3-sync：身份按钮与来源撤回修正；保留 3.3.2 的活动资料库与延迟发现。 */
+/* NPC Life 3.3.10-sync：追踪人物默认开启背景状态，近况描述每 3 轮角色回复写一次。 */
 // 已核对 ST 1.17.0 public/script.js 的真实枚举导出和深度注入签名。
 import { extension_prompt_types, extension_prompt_roles, isGenerating } from '../../../../script.js';
 import { mountConsole } from './console.js';
@@ -8,8 +8,9 @@ import { timelineContext } from './timeline.js';
 import { createWorldService } from './world-service.js';
 import { normalizeLedger, appendSettlementDrafts, commitLedgerTurn, revokeLedgerTurn, revokeBySourceKeys, draftsFromSettlement, buildLedgerInjection, tracesShownInText, canArrangeActivity, hasSufficientProfile, isUserDesignated, recordOfferedOpportunities, applyStoryDiscoveries } from './activity-ledger.js';
 import { buildLivingWorldInjection } from './living-world.js';
+import { collectBackgroundSlots, collectPreviousBackgrounds, formatBackgroundInjection, withReservedBackground, createBackgroundRenderer, isBackgroundStatusOn, shouldWriteBackgroundPlot } from './background-status.js';
 
-const RELEASE_VERSION = '3.3.3-sync';
+const RELEASE_VERSION = '3.3.10-sync';
 
 const MODULE_NAME = 'npc-life';
 const ROOT = '#npc-life-settings';
@@ -42,6 +43,7 @@ let consoleFeatures = null;
 let automationScheduler = null;
 let worldService = null;
 let promptSyncCleanup = null;
+let backgroundRenderer = null;
 
 const ROLE_ONLY = /^(?:室友|舍友|老板|守卫|船夫|骑士|卫兵|管家|队长|长老|祭司|士兵|商人|旅人|猎人|老师|医生|警卫|护卫|roommate|guard|captain|merchant|teacher|doctor)$/iu;
 const ORGANIZATION_NAME = /商会|公会|协会|组织|势力|国家|王国|帝国|阵营|教会|教团|集团|家族|联盟|军团|公司/u;
@@ -234,6 +236,7 @@ function makeNpc(name, source = 'card') {
     return {
         id: `npc:${idPart(clean)}`, name: clean, aliases: [], entityType: ['manual', 'legacy'].includes(source) ? 'person' : 'unknown', identityEvidence: '', source,
         description: '', tracked: ['manual', 'legacy'].includes(source), confirmed: ['manual', 'legacy'].includes(source),
+        backgroundStatus: ['manual', 'legacy'].includes(source) ? true : undefined,
     };
 }
 
@@ -565,6 +568,7 @@ function enrollNpc(world, chat, npc, reason) {
     npc.entityType = 'person';
     const already = npc.tracked === true;
     npc.tracked = true;
+    if (!already && npc.backgroundStatus !== false) npc.backgroundStatus = true;
     if (!chat.npcStates[npc.id]) chat.npcStates[npc.id] = makeNpcState(npc.id);
     if (!already) { npc.enrolledReason = reason; npc.enrolledAt = Date.now(); }
     return !already;
@@ -622,18 +626,18 @@ function classifyNpc(id, entityType) {
     if(entityType==='organization') {
         const record={id:`org:${idPart(source.name)}`,name:source.name,entityType:'organization',description:source.description||'',identityEvidence:source.identityEvidence||'',source:'manual'};
         world.catalog.organizations=[...world.catalog.organizations.filter(item=>item.id!==record.id),record];
-        if(npc){npc.entityType='organization';npc.tracked=false;npc.confirmed=false;}
+        if(npc){npc.entityType='organization';npc.tracked=false;npc.confirmed=false;npc.backgroundStatus=false;}
         world.catalog.identityCandidates = world.catalog.identityCandidates.filter(item=>item.id!==id);
     } else if(entityType==='person') {
         const existing=world.catalog.npcs.find(item=>item.id===`npc:${idPart(source.name)}`);
         const person=existing||makeNpc(source.name,'manual');
-        person.entityType='person';person.identityEvidence=source.identityEvidence||person.identityEvidence||'';person.tracked=true;person.confirmed=true;
+        person.entityType='person';person.identityEvidence=source.identityEvidence||person.identityEvidence||'';person.tracked=true;person.confirmed=true;if(person.backgroundStatus!==false)person.backgroundStatus=true;
         person.aliases = [...new Set([...(person.aliases || []), ...(source.aliases || [])])].filter(alias => alias && alias !== person.name);
         if(!existing)world.catalog.npcs.push(person);
         if (source.entityType === 'organization') world.catalog.organizations = world.catalog.organizations.filter(item => item.id !== id);
         world.catalog.identityCandidates = world.catalog.identityCandidates.filter(item=>item.id!==id);
     } else if(npc){
-        npc.entityType='unknown';npc.tracked=false;npc.confirmed=false;
+        npc.entityType='unknown';npc.tracked=false;npc.confirmed=false;npc.backgroundStatus=false;
         world.catalog.identityCandidates=[...world.catalog.identityCandidates.filter(item=>item.id!==id),{...source,entityType:'unknown'}];
     } else {
         world.catalog.identityCandidates=[...world.catalog.identityCandidates.filter(item=>item.id!==id),{...source,entityType:'unknown'}];
@@ -1801,9 +1805,14 @@ function buildInjectionText() {
     });
     if (ledgerInject.text) parts.push(ledgerInject.text);
     if (living.text) parts.push(living.text);
+    const backgroundNpcs = world.catalog.npcs.filter(item => activeNpc(item) && isBackgroundStatusOn(item));
+    const previousBackgrounds = collectPreviousBackgrounds(getCtx().chat, backgroundNpcs);
+    const messages = Array.isArray(getCtx().chat) ? getCtx().chat : [];
+    const backgroundText = shouldWriteBackgroundPlot(messages, prefs.backgroundPlotEvery)
+        ? formatBackgroundInjection(collectBackgroundSlots(ledger, backgroundNpcs), previousBackgrounds)
+        : '';
     const cap = safeInt(prefs.injectionBudget, 4500, 1500, 12000);
-    const assembled = parts.join('\n\n');
-    const text = assembled.length <= cap ? assembled : assembled.slice(0, cap);
+    const text = withReservedBackground(parts.join('\n\n'), backgroundText, cap);
     // 只把最终真正出现在提示里的机会记为已提供，避免被字数上限截掉后仍按“曾提供”宽松匹配。
     const shown = tracesShownInText(text, ledgerInject.opportunityTraces, context);
     const knownIds = new Set((ledger.discoveries || []).map(item => item.id));
@@ -1948,7 +1957,9 @@ function renderRoster() {
             .find('input').prop('checked', state.locked === true).end();
         const activityBox = $('<label class="checkbox_label"><input type="checkbox" data-activity-lock><span>闭关/活动锁</span></label>')
             .find('input').prop('checked', state.activityLock?.active === true).end();
-        row.append($('<div class="npc-life-checks"></div>').append(trackBox, confirmBox, lockBox, activityBox));
+        const backgroundBox = $('<label class="checkbox_label"><input type="checkbox" data-background-status><span>背景状态</span></label>')
+            .find('input').prop('checked', npc.tracked === true ? npc.backgroundStatus !== false : npc.backgroundStatus === true).end();
+        row.append($('<div class="npc-life-checks"></div>').append(trackBox, confirmBox, lockBox, activityBox, backgroundBox));
         row.append($('<input class="text_pole" data-npc-location placeholder="当前地点（已确认地点）">').val(locationName(world, state.locationId) === '未知地点' ? '' : locationName(world, state.locationId)));
         row.append($('<label class="npc-life-row">行动能力<select class="text_pole" data-mobility><option value="unknown">未知</option><option value="free">可自由行动</option><option value="restricted">受限行动</option><option value="immobile">不可移动（闭关/囚禁等）</option></select></label>').find('select').val(state.mobility || 'unknown').end());
         if (state.activityLock?.active) row.append($('<button type="button" class="menu_button" data-release-lock>确认解除限制</button>'));
@@ -2167,6 +2178,7 @@ function render() {
     renderTravelPlans();
     renderEvents();
     consoleView?.render();
+    backgroundRenderer?.refresh?.();
 }
 
 // 按 NPC 姓名检索带预算的静态设定，清洗后才进入生成请求。
@@ -2439,6 +2451,28 @@ function initializePromptSync() {
     };
 }
 
+// 只在 DOM 里把专用标签折成可折叠块，仅挂在最新一条角色回复下，不改写聊天正文。
+function initializeBackgroundRender() {
+    backgroundRenderer?.destroy();
+    backgroundRenderer = createBackgroundRenderer({
+        context: getCtx,
+        getAllowedNames: () => {
+            const { world } = activeData();
+            const names = [];
+            for (const npc of world.catalog.npcs.filter(item => activeNpc(item) && isBackgroundStatusOn(item))) {
+                names.push(npc.name, ...(npc.aliases || []));
+            }
+            return names;
+        },
+        getFallbackEntries: () => {
+            const { world } = activeData();
+            const backgroundNpcs = world.catalog.npcs.filter(item => activeNpc(item) && isBackgroundStatusOn(item));
+            return collectPreviousBackgrounds(getCtx().chat, backgroundNpcs);
+        },
+    });
+    backgroundRenderer.bind();
+}
+
 function initializeAutomation() {
     automationScheduler = createAutomationScheduler({
         context: getCtx, data: activeData, identity: () => worldId() + '|' + chatId(),
@@ -2578,6 +2612,7 @@ function addUI() {
     root.on('click.npcLife', '[data-dismiss-request]', guarded(function () { const { chat } = activeData(); const id = $(this).closest('[data-request-id]').attr('data-request-id'); chat.appearanceRequests = chat.appearanceRequests.filter(item => item.id !== id); save(); render(); }));
     root.on('change.npcLife', '[data-track]', guarded(function () { const row = $(this).closest('[data-npc-id]'); const { world } = activeData(); const npc = world.catalog.npcs.find(item => item.id === row.attr('data-npc-id')); if (npc) { npc.tracked = this.checked; npc.confirmed = this.checked; save(); render(); } }));
     root.on('change.npcLife', '[data-confirm-npc]', guarded(function () { const row = $(this).closest('[data-npc-id]'); const { world } = activeData(); const npc = world.catalog.npcs.find(item => item.id === row.attr('data-npc-id')); if (npc) { npc.confirmed = this.checked; if (!this.checked) npc.tracked = false; save(); render(); } }));
+    root.on('change.npcLife', '[data-background-status]', guarded(function () { const row = $(this).closest('[data-npc-id]'); const { world } = activeData(); const npc = world.catalog.npcs.find(item => item.id === row.attr('data-npc-id')); if (npc) { npc.backgroundStatus = this.checked === true; save(); render(); } }));
     root.on('change.npcLife', '[data-lock]', guarded(function () { const row = $(this).closest('[data-npc-id]'); const { chat } = activeData(); const state = chat.npcStates[row.attr('data-npc-id')]; if (state) { state.locked = this.checked; /* 锁定=持续保留状态，不冻结行为，也不改写成不可移动。 */ save(); render(); } }));
     root.on('click.npcLife', '[data-release-lock]', guarded(function () { const row = $(this).closest('[data-npc-id]'); const { chat } = activeData(); const state = chat.npcStates[row.attr('data-npc-id')]; if (!state?.activityLock?.active) return; if (!window.confirm(`确认解除限制“${state.activityLock.reason || state.activityLock.kind}”？`)) return; state.activityLock.active = false; state.locked = false; state.mobility = 'unknown'; save(); render(); }));
     root.on('change.npcLife', '[data-mobility], [data-activity-lock], [data-lock-reason], [data-goals], [data-relationship], [data-travel-rate]', guarded(function () { const row = $(this).closest('[data-npc-id]'); const { chat } = activeData(); const state = chat.npcStates[row.attr('data-npc-id')]; if (!state) return; if (this.matches('[data-mobility]')) state.mobility = this.value; else if (this.matches('[data-activity-lock]')) { if (this.checked) { state.activityLock = { active: true, kind: 'activity_lock', reason: state.activityLock?.reason || '', source: 'manual', untilDay: null, evidence: '' }; state.mobility = 'immobile'; } else if (state.activityLock?.kind === 'activity_lock' && !state.activityLock.reason) { state.activityLock = null; state.mobility = 'unknown'; } else if (!this.checked) throw new Error('具名限制不能直接取消，请先在原因字段说明解除条件。'); } else if (this.matches('[data-lock-reason]')) { state.activityLock ||= { active: true, kind: 'activity_lock', source: 'manual', untilDay: null, evidence: '' }; state.activityLock.reason = cleanText(this.value); } else if (this.matches('[data-travel-rate]')) { const rate = Number(this.value); state.travelRate = Number.isInteger(rate) && rate > 0 ? rate : null; } else if (this.matches('[data-goals]')) state.goals = this.value.split(/[;；]/).map(cleanText).filter(Boolean).slice(0, 10); else { state.relationship ||= { value: 'unknown', source: 'manual' }; state.relationship.note = cleanText(this.value); state.relationship.source = 'manual'; } save(); render(); }));
@@ -2606,6 +2641,7 @@ function init() {
         checkIdentity();
         initializeAutomation();
         initializePromptSync();
+        initializeBackgroundRender();
         render();
         const prefs = rootSettings().preferences || {};
         npcLog('info', '插件已加载', {
@@ -2618,7 +2654,7 @@ function init() {
         });
         const onChange = () => { try { if (!checkIdentity()) { const { world, chat } = activeData(); if (revokeMissingCanonFacts(world, chat)) { save(); render(); } } if (rootSettings().preferences.autoMode === 'world') worldService?.reconcile(); automationScheduler?.tick(); } catch (error) { console.error('[npc-life]', error); } };
         pollTimer = setInterval(onChange, 700);
-        window.__npcLifeRpgCleanup = () => { clearInterval(pollTimer); revision++; promptSyncCleanup?.(); try { setPrompt(''); } catch { /* 注入接口不可用时仍清理 UI */ } automationScheduler?.destroy(); automationScheduler = null; worldService?.destroy?.(); worldService = null; try { getCtx().setExtensionPrompt?.(WORLD_PROMPT_KEY, '', extension_prompt_types.IN_CHAT, 3, false, extension_prompt_roles.SYSTEM); } catch { /* 清理同步注入。 */ } consoleFeatures?.destroy(); consoleView?.destroy(); consoleView = null; $(ROOT).off('.npcLife').remove(); $('#npc-life-extension-launcher').remove(); settingsGlobalCleanup?.(); settingsGlobalCleanup = null; };
+        window.__npcLifeRpgCleanup = () => { clearInterval(pollTimer); revision++; promptSyncCleanup?.(); backgroundRenderer?.destroy(); backgroundRenderer = null; try { setPrompt(''); } catch { /* 注入接口不可用时仍清理 UI */ } automationScheduler?.destroy(); automationScheduler = null; worldService?.destroy?.(); worldService = null; try { getCtx().setExtensionPrompt?.(WORLD_PROMPT_KEY, '', extension_prompt_types.IN_CHAT, 3, false, extension_prompt_roles.SYSTEM); } catch { /* 清理同步注入。 */ } consoleFeatures?.destroy(); consoleView?.destroy(); consoleView = null; $(ROOT).off('.npcLife').remove(); $('#npc-life-extension-launcher').remove(); settingsGlobalCleanup?.(); settingsGlobalCleanup = null; };
     } catch (error) {
         console.error('[npc-life] 初始化失败', error);
         window.alert(`NPC Life 初始化失败：${error?.message ?? error}`);
