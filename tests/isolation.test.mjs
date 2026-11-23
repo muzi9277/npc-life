@@ -113,11 +113,11 @@ const ledger = {
   }
 };
 
-test("keeps the published script id and a distinct 3.5.4 name", () => {
+test("keeps the published script id and the 3.5.3 beta display name", () => {
   assert.equal(raw.id, "923cea18-89d1-47c1-ac88-13555709f9dc");
-  assert.equal(raw.name, "NPC Life 3.5.4");
-  assert.match(src, /Ci="3\.5\.4"/);
-  assert.match(src, /isolatedNpcCalls:!0/);
+  assert.equal(raw.name, "NPC Life 3.5.3 beta");
+  assert.match(src, /Ci="3\.5\.3 beta"/);
+  assert.match(src, /isolatedNpcCalls:!1/);
   assert.match(src, /runOne:\(name,messages,card\)=>Jr\(/);
   assert.equal(fs.readFileSync(previousUrl, "utf8").includes("NPC Life 3.5.3"), true);
 });
@@ -168,22 +168,19 @@ test("an in-scene packet can include the witnessed lines and not the other archi
   assert.doesNotMatch(packet.prompt, /乙的暗格/);
 });
 
-test("the prescreen prompt lists names and recent lines, not private cards", async () => {
-  let seen = "";
+test("local prescreen does not call a model and keeps off-stage secrets out of the packet", async () => {
+  let asked = false;
   const screen = await nl353Prescreen({
     bifa: { 名单: ["林青", "阿芷"], NPC: cards },
     chatMessages: [{ role: "user", content: "林青，过来。" }],
-    ask: async (prompt) => {
-      seen = prompt;
-      return { characters: ["林青"] };
+    ask: async () => {
+      asked = true;
+      return { characters: ["林青", "阿芷"] };
     }
   });
-  assert.match(seen, /林青/);
-  assert.match(seen, /过来/);
-  assert.doesNotMatch(seen, new RegExp(secret));
-  assert.doesNotMatch(seen, /林青在等一封信/);
-  assert.doesNotMatch(seen, /写信/);
-  assert.deepEqual([...screen.selected], ["林青", "阿芷"]);
+  assert.equal(asked, false);
+  assert.equal(screen.gateNames, null);
+  assert.deepEqual([...screen.selected], ["林青"]);
   const offstage = nl353BuildPacket({
     name: "阿芷",
     cards: screen.cards,
@@ -213,14 +210,19 @@ test("selection trusts a real gate list, keeps off-stage beats, and caps the lis
   assert.equal(nl353SelectCharacters({ roster: many, gateNames: many, inScene: [], offstage: [] }).length, 6);
 });
 
-test("a bad gate answer falls back to local presence instead of an empty list", async () => {
+test("a prescreen model answer is ignored and only people in the scene are selected", async () => {
+  let asked = false;
   const screen = await nl353Prescreen({
     bifa: { 名单: ["林青", "阿芷"], NPC: cards },
     chatMessages: [{ role: "assistant", content: "林青还在廊下。" }],
-    ask: async () => "不是 JSON"
+    ask: async () => {
+      asked = true;
+      return "不是 JSON";
+    }
   });
+  assert.equal(asked, false);
   assert.equal(screen.gateNames, null);
-  assert.deepEqual([...screen.selected], ["林青", "阿芷"]);
+  assert.deepEqual([...screen.selected], ["林青"]);
 });
 
 test("merged updates drop any other character the model tried to write", () => {
