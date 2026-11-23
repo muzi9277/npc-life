@@ -26,6 +26,22 @@ test("a rename keeps the old key as an alias", () => {
   assert.equal([...stamped].includes("林淑仪"), false);
 });
 
+test("generic titles are not stored, and they do not light up longer unrelated names", () => {
+  assert.deepEqual(
+    [...api.nl353NormalizeAliases("林青", ["老板", "师姐", " 队长 ", "林老板", "陈师姐", "林青"])],
+    ["林老板", "陈师姐"]
+  );
+  assert.equal(api.nl353WorldbookNameHit("酒馆老板", "老板"), false);
+  assert.equal(api.nl353WorldbookNameHit("护卫队长", "队长"), false);
+  assert.equal(api.nl353WorldbookNameHit("林老板的铺子", "林老板"), true);
+  assert.equal(api.nl353WorldbookNameHit("陈师姐来过", "陈师姐"), true);
+  assert.equal(api.nl353GuardedMention("酒馆老板在柜台后", "老板", [], "qo"), false);
+  assert.equal(api.nl353GuardedMention("护卫队长进门", "队长", [], "qo"), false);
+  assert.equal(api.nl353GuardedMention("林老板来了", "林老板", [], "qo"), true);
+  assert.equal(api.nl353CardMentioned("酒馆老板在喊人", "林青", { aliases: ["老板"] }, ["林青"]), false);
+  assert.equal(api.nl353GuardedMention("玛丽莲来了", "玛丽", ["玛丽莲"], "qo"), false);
+});
+
 test("formal names keep the old containment rule, aliases do not swallow a longer name", () => {
   assert.equal(api.nl353CardMentioned("玛丽莲来了", "玛丽", {}, ["玛丽", "玛丽莲"]), true);
   assert.equal(api.nl353CardMentioned("玛丽莲来了", "张三", { aliases: ["玛丽"] }, ["张三", "玛丽莲"]), false);
